@@ -1,0 +1,13 @@
+[
+  {"tile_id": 0, "name": "GO", "type": "SPECIAL", "tile_type": "GO"},
+  {"tile_id": 1, "name": "Mediterranean Avenue", "type": "PROPERTY", "group": "Brown", "price": 60, "rent_base": 2},
+  {"tile_id": 2, "name": "Community Chest", "type": "SPECIAL", "tile_type": "COMMUNITY_CHEST"},
+  {"tile_id": 3, "name": "Baltic Avenue", "type": "PROPERTY", "group": "Brown", "price": 60, "rent_base": 4},
+  {"tile_id": 4, "name": "Income Tax", "type": "TAX", "tax_amount": 200},
+  {"tile_id": 5, "name": "Reading Railroad", "type": "PROPERTY", "group": "Railroad", "price": 200, "rent_base": 25},
+  {"tile_id": 10, "name": "In Jail / Just Visiting", "type": "SPECIAL", "tile_type": "JAIL"},
+  {"tile_id": 20, "name": "Free Parking", "type": "SPECIAL", "tile_type": "FREE_PARKING"},
+  {"tile_id": 30, "name": "Go To Jail", "type": "SPECIAL", "tile_type": "GO_TO_JAIL"},
+  {"tile_id": 38, "name": "Luxury Tax", "type": "TAX", "tax_amount": 75},
+  {"tile_id": 39, "name": "Boardwalk", "type": "PROPERTY", "group": "Dark Blue", "price": 400, "rent_base": 50}
+]

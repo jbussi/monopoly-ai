@@ -1,0 +1,11 @@
+[
+  {"card_id": 1, "text": "Sua caderneta de poupança rendeu! Receba $100.", "effect_type": "MONEY_GAIN", "value": 100},
+  {"card_id": 2, "text": "Imposto de herança. Pague $150.", "effect_type": "MONEY_LOSS", "value": 150},
+  {"card_id": 3, "text": "Erro do banco a seu favor. Receba $200.", "effect_type": "MONEY_GAIN", "value": 200},
+  {"card_id": 4, "text": "Mensalidade do hospital. Pague $100.", "effect_type": "MONEY_LOSS", "value": 100},
+  {"card_id": 5, "text": "Receba dividendos das suas ações. Receba $50.", "effect_type": "MONEY_GAIN", "value": 50},
+  {"card_id": 6, "text": "Vá direto para a linha de Partida (GO).", "effect_type": "MOVE_TO", "value": 0},
+  {"card_id": 7, "text": "Avance até o Boardwalk.", "effect_type": "MOVE_TO", "value": 39},
+  {"card_id": 8, "text": "Saída Livre da Prisão! Guarde esta carta.", "effect_type": "GET_JAIL_CARD", "value": 0},
+  {"card_id": 9, "text": "Multa por excesso de velocidade. Pague $50.", "effect_type": "MONEY_LOSS", "value": 50}
+]
