@@ -1,65 +1,68 @@
+
 import random
-from typing import Tuple
-from typing import Dict, Any
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
-class Dice:
-    def __init__(self, sides: int = 6):
-        self.sides = sides
-    
-    def roll(self) -> Tuple[int, int]:
-        """
-        Rola dois dados de 6 faces, atualiza o histórico e o contador de duplos.
-        Retorna os valores dos dois dados.
-        """
-        die1 = random.randint(1, self.sides)
-        die2 = random.randint(1, self.sides)
-        
-        self.last_roll = (die1, die2)
 
-        if self.is_double():
-            self.double_count += 1
-        else:
-            self.double_count = 0
-    
+@dataclass(frozen=True, slots=True)
+class DiceRoll:
+    """Resultado imutável de um lançamento de dois dados."""
+
+    die1: int
+    die2: int
+
+    @property
+    def total(self) -> int:
+        return self.die1 + self.die2
+
+    @property
     def is_double(self) -> bool:
-        """
-        Verifica se o último lançamento foi um duplo.
-        Retorna True se for um duplo, caso contrário, False.
-        """
-        return self.last_roll[0] == self.last_roll[1]
-    
-    def reset_double_count(self) -> None:
-            """Zera o contador de duplos (deve ser chamado ao mudar de turno)."""
-            self.double_count = 0
-    
-    @property
-    def total_value(self) -> int:
-        """Retorna a soma dos valores dos dois dados do último lançamento."""
-        return sum(self.last_roll)
-    
-    @property
-    def speed_jail_condition(self) -> bool:
-        """Retorna True se o jogador deve ir para a prisão por causa de três duplos consecutivos."""
-        return self.double_count >= 3
-    
-    @property
-    def doubles_remaining_for_jail(self) -> int:
-        """
-        Retorna quantos duplos faltam para o jogador ir para a prisão.
-        Isso será um input crucial (Feature) para o estado da IA.
-        """
-        return max(0, 3 - self.double_count)
+        return self.die1 == self.die2
 
-    def get_roll_data_for_log(self) -> Dict[str, Any]:
-        """
-        Retorna um dicionário com os dados brutos da rodada atual.
-        Facilita o armazenamento do histórico do jogo.
-        """
-        return {
-            "die1": self.last_roll[0],
-            "die2": self.last_roll[1],
-            "total": self.total_value,
-            "is_double": self.is_double(),
-            "accumulated_doubles": self.double_count,
-            "doubles_remaining_for_jail": self.doubles_remaining_for_jail
-        }
+
+class DiceMechanism(ABC):
+    """Contrato para mecanismos de lançamento de dois dados."""
+
+    @abstractmethod
+    def roll(self) -> DiceRoll:
+        """Gera e retorna um resultado de lançamento."""
+        raise NotImplementedError
+
+
+class StandardDice(DiceMechanism):
+    """Dois dados justos com número de faces configurável."""
+
+    def __init__(
+        self,
+        sides: int | tuple[int, int] = 6,
+        seed: int | None = None,
+    ) -> None:
+        if isinstance(sides, int):
+            sides = (sides, sides)
+
+        if (
+            len(sides) != 2
+            or any(
+                not isinstance(n, int)
+                or isinstance(n, bool)
+                or n < 2
+                for n in sides
+            )
+        ):
+            raise ValueError(
+                "Informe dois números inteiros de faces, "
+                "ambos maiores ou iguais a 2."
+            )
+
+        self._sides = sides
+        self._rng = random.Random(seed)
+
+    @property
+    def sides(self) -> tuple[int, int]:
+        return self._sides
+
+    def roll(self) -> DiceRoll:
+        die1 = self._rng.randint(1, self._sides[0])
+        die2 = self._rng.randint(1, self._sides[1])
+
+        return DiceRoll(die1=die1, die2=die2)

@@ -1,47 +1,76 @@
-from typing import List, Any
-from src.engine.game_state import GameState
-from src.engine.game_loop import GameLoop
-from src.engine.actions import GameAction
-from src.controllers.base_controller import BaseController
+from collections.abc import Mapping
+from uuid import UUID
+
+from actions import GameAction
+from game_loop import GameLoop
+from game_state import GameState
+from base_controller import BaseController
+
 
 class GameManager:
-    def __init__(self, player_names: List[str], controllers: List[BaseController]):
-        self.game_state = GameState(player_names)
-        self.engine_loop = GameLoop(self.game_state)
-        self.controllers = controllers 
+    def __init__(
+        self,
+        game_state: GameState,
+        engine_loop: GameLoop,
+        controllers: Mapping[UUID, BaseController],
+    ) -> None:
+        self.game_state = game_state
+        self.engine_loop = engine_loop
+        self.controllers = dict(controllers)
 
-    def run_game(self):
+        self._validate_controllers()
+
+    def _validate_controllers(self) -> None:
+        """Verifica se todos os jogadores possuem um controlador."""
+
+        player_ids = set(self.game_state.players.keys())
+        controller_ids = set(self.controllers.keys())
+
+        missing = player_ids - controller_ids
+
+        if missing:
+            raise ValueError(
+                f"Não existem controladores para os jogadores: {missing}"
+            )
+
+    def step(self) -> dict:
+        """Executa uma única ação na partida."""
+
+        if self.game_state.game_over:
+            raise RuntimeError("A partida já terminou.")
+
+        # Durante um leilão, outro jogador pode precisar agir.
+        player = self.engine_loop.current_decision_player
+        controller = self.controllers[player.player_id]
+
+        action = controller.get_decision(
+            self.game_state,
+            phase=self.engine_loop.turn_phase,
+        )
+
+        if not isinstance(action, GameAction):
+            raise TypeError(
+                "O controlador deve retornar uma instância de GameAction."
+            )
+
+        return self.engine_loop.process_action(action)
+
+    def run_game(self, max_actions: int = 100_000) -> GameState:
+        """Executa a partida até o fim ou até atingir o limite de ações."""
+
+        if max_actions < 1:
+            raise ValueError("max_actions deve ser maior que zero.")
+
+        actions_executed = 0
+
         while not self.game_state.game_over:
-            self.step_turn()
-        print(f"🏆 Fim de Jogo! Vencedor: {self.game_state.winner.name}")
+            if actions_executed >= max_actions:
+                raise RuntimeError(
+                    "A partida excedeu o limite de ações. "
+                    "Verifique se algum controlador está repetindo ações inválidas."
+                )
 
-    def step_turn(self):
-        active_player = self.game_state.current_player
-        player_id = active_player.player_id
-        controller = self.controllers[player_id]
+            self.step()
+            actions_executed += 1
 
-        # --- FASE 1: ANTES DA ROLAGEM ---
-        while self.engine_loop.turn_phase == "BEFORE_ROLL":
-            action: GameAction = controller.get_decision(self.game_state, phase="BEFORE_ROLL")
-            if action.action_type == "ROLL_DICE":
-                self.engine_loop.process_action(action)
-                break
-            else:
-                self.engine_loop.process_action(action)
-
-        # --- FASE 2: RESOLUÇÃO DE TERRENO ---
-        if self.engine_loop.turn_phase == "AWAITING_PROPERTY_DECISION":
-            action: GameAction = controller.get_decision(self.game_state, phase="AWAITING_PROPERTY_DECISION")
-            if action.action_type in ["BUY_PROPERTY", "DECLINE_PROPERTY"]:
-                self.engine_loop.process_action(action)
-            else:
-                self.engine_loop.process_action(GameAction("DECLINE_PROPERTY"))
-
-        # --- FASE 3: PÓS-ROLAGEM ---
-        while self.engine_loop.turn_phase == "AFTER_ROLL":
-            action: GameAction = controller.get_decision(self.game_state, phase="AFTER_ROLL")
-            if action.action_type == "END_TURN":
-                self.engine_loop.process_action(action)
-                break
-            else:
-                self.engine_loop.process_action(action)
+        return self.game_state

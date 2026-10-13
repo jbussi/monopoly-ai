@@ -1,83 +1,98 @@
-import json
-import os
+
 import random
-from typing import List
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID, uuid4
 
+
+@dataclass(frozen=True, slots=True)
+class CardEffect(ABC):
+    """Contrato para representar um efeito de carta."""
+
+    @abstractmethod
+    def to_dict(self) -> dict[str, Any]:
+        """Representa o efeito em formato serializável."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
 class Card:
-    """Representa uma carta de Sorte ou Revés (Chance / Community Chest)."""
-    def __init__(self, card_id: int, text: str, effect_type: str, value: int):
-        self.card_id: int = card_id
-        self.text: str = text
-        
-        # Tipos de efeito esperados pelo GameLoop: 
-        # "MONEY_GAIN" (Ganha dinheiro), "MONEY_LOSS" (Perde dinheiro), 
-        # "MOVE_TO" (Vai para casa específica), "GET_JAIL_CARD" (Carta de sair da prisão)
-        self.effect_type: str = effect_type
-        self.value: int = value
+    """Definição imutável de uma carta."""
 
-    def __repr__(self):
-        return f"<Card [{self.card_id}]: {self.effect_type} ({self.value})>"
+    card_id: str
+    text: str
+    effect: CardEffect
 
 
-class CardDeck:
-    """Gerencia o baralho de cartas, cuidando do carregamento via JSON, descarte e embaralhamento."""
-    def __init__(self, json_path: str = "data/cards_v1.json"):
-        self.json_path: str = json_path
-        self.cards: List[Card] = self._load_cards_from_json()
-        self.discard_pile: List[Card] = []
+class CardDeck(ABC):
+    """Contrato para baralhos de cartas."""
+
+    @abstractmethod
+    def draw(self) -> Card:
+        """Retira uma carta do baralho."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def return_card(self, card: Card) -> None:
+        """Devolve uma carta ao baralho."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def shuffle(self) -> None:
+        """Embaralha as cartas disponíveis."""
+        raise NotImplementedError
+
+
+class StandardCardDeck(CardDeck):
+    """
+    Baralho com compra, descarte e embaralhamento.
+
+    As cartas retiradas permanecem fora do baralho até serem
+    devolvidas explicitamente ou o descarte ser reciclado.
+    """
+
+    def __init__(
+        self,
+        cards: list[Card],
+        seed: int | None = None,
+        recycle_discard: bool = True,
+    ) -> None:
+        if not cards:
+            raise ValueError("O baralho deve possuir ao menos uma carta.")
+
+        ids = [card.card_id for card in cards]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Os IDs das cartas devem ser únicos no baralho.")
+
+        self._cards = list(cards)
+        self._discard_pile: list[Card] = []
+        self._rng = random.Random(seed)
+        self._recycle_discard = recycle_discard
+
         self.shuffle()
 
-    def draw_card(self) -> Card:
-        """Puxa uma carta do topo. Se o deck esvaziar, reembaralha o descarte."""
-        if not self.cards:
-            if not self.discard_pile:
-                # Fallback de segurança extrema caso o descarte também suma
-                self.cards = self._generate_fallback_cards()
-            else:
-                self.cards = list(self.discard_pile)
-                self.discard_pile.clear()
+    @property
+    def remaining(self) -> int:
+        return len(self._cards)
+
+    @property
+    def discarded(self) -> int:
+        return len(self._discard_pile)
+
+    def draw(self) -> Card:
+        if not self._cards:
+            if not self._recycle_discard or not self._discard_pile:
+                raise LookupError("Não há cartas disponíveis para compra.")
+
+            self._cards = self._discard_pile
+            self._discard_pile = []
             self.shuffle()
-            
-        card = self.cards.pop(0)
-        
-        # Cartas de "Sair Livre da Prisão" não vão para o descarte imediatamente, 
-        # elas ficam retidas no inventário do jogador até serem usadas.
-        if card.effect_type != "GET_JAIL_CARD":
-            self.discard_pile.append(card)
-            
-        return card
 
-    def return_jail_card_to_deck(self, card_id: int):
-        """Devolve a carta de prisão para o monte de descarte quando o jogador a utiliza."""
-        jail_card = Card(card_id, "Saída Livre da Prisão! Guarde esta carta para quando precisar.", "GET_JAIL_CARD", 0)
-        self.discard_pile.append(jail_card)
+        return self._cards.pop(0)
 
-    def shuffle(self):
-        """Embaralha o deck de cartas atual."""
-        random.shuffle(self.cards)
+    def return_card(self, card: Card) -> None:
+        self._discard_pile.append(card)
 
-    def _load_cards_from_json(self) -> List[Card]:
-        """Carrega e instancia dinamicamente as cartas a partir do arquivo JSON."""
-        cards_list: List[Card] = []
-        
-        if not os.path.exists(self.json_path):
-            return self._generate_fallback_cards()
-
-        with open(self.json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for item in data:
-                cards_list.append(Card(
-                    card_id=item["card_id"],
-                    text=item["text"],
-                    effect_type=item["effect_type"],
-                    value=item["value"]
-                ))
-                
-        return cards_list
-
-    def _generate_fallback_cards(self) -> List[Card]:
-        """Gera um deck mínimo de segurança caso o arquivo JSON não seja encontrado."""
-        return [
-            Card(1, "Sorte do iniciante! Receba $100.", "MONEY_GAIN", 100),
-            Card(2, "Taxa de serviços hospitalares. Pague $50.", "MONEY_LOSS", 50)
-        ]
+    def shuffle(self) -> None:
+        self._rng.shuffle(self._cards)
