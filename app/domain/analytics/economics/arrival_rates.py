@@ -4,8 +4,8 @@ from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from math import isfinite
 
-from markov.transition_matrix import TransitionMatrix
-from markov.stationary import calculate_stationary_distribution
+from ..markov.transition_matrix import TransitionMatrix
+from ..markov.stationary import calculate_stationary_distribution
 
 
 State = Hashable
