@@ -3,9 +3,6 @@ from abc import ABC, abstractmethod
 
 
 
-from abc import ABC, abstractmethod
-
-
 class Rules(ABC):
     """Contrato para variantes das regras de uma partida."""
 

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
-from actions import GameAction
-from game_state import GameState
+from .actions import GameAction
+from .game_state import GameState
 
 
 class BaseController(ABC):

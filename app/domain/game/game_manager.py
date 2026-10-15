@@ -1,10 +1,10 @@
 from collections.abc import Mapping
 from uuid import UUID
 
-from actions import GameAction
-from game_loop import GameLoop
-from game_state import GameState
-from base_controller import BaseController
+from .actions import GameAction
+from .game_loop import GameLoop
+from .game_state import GameState
+from .base_controller import BaseController
 
 
 class GameManager:
