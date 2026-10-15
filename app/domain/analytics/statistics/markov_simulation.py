@@ -3,7 +3,7 @@ from collections.abc import Hashable
 
 import numpy as np
 
-from markov.transition_matrix import TransitionMatrix
+from ..markov.transition_matrix import TransitionMatrix
 
 
 def simulate_markov_chain(

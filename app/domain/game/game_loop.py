@@ -1,9 +1,9 @@
 
 from typing import Any
 
-from actions import GameAction
-from board import PropertyTile, SpecialTile, TaxTile
-from game_state import GameState
+from .actions import GameAction
+from .board import PropertyTile, SpecialTile, TaxTile
+from .game_state import GameState
 
 
 class GameLoop:

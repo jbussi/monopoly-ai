@@ -2,9 +2,9 @@
 from dataclasses import dataclass
 from uuid import UUID
 
-from player import Player
-from pieces import Piece
-from board import Board, PropertyTile
+from .player import Player
+from .pieces import Piece
+from .board import Board, PropertyTile
 
 
 @dataclass
