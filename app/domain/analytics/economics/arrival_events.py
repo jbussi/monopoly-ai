@@ -6,7 +6,7 @@ from math import isfinite
 import numpy as np
 from numpy.typing import NDArray
 
-from app.domain.analytics import TransitionMatrix
+from ..markov import TransitionMatrix
 
 
 FloatVector = NDArray[np.float64]
