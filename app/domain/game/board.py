@@ -23,16 +23,36 @@ class TaxTile(Tile):
     """Casa que cobra um valor definido."""
 
     tax_amount: int
+    # Alternativa percentual sobre o patrimônio (ex.: 10% no Income Tax clássico)
+    percent_option: int | None = None
+
+
+class PropertyKind:
+    STREET = "street"
+    RAILROAD = "railroad"
+    UTILITY = "utility"
 
 
 @dataclass(frozen=True, slots=True)
 class PropertyTile(Tile):
-    """Definição de um imóvel disponível no tabuleiro."""
+    """
+    Definição de um imóvel disponível no tabuleiro.
+
+    O significado de `rent_values` depende do tipo:
+        street:   (base, 1 casa, 2, 3, 4, hotel)
+        railroad: aluguel por quantidade de ferrovias do dono (1, 2, 3, 4)
+        utility:  multiplicador dos dados por quantidade de companhias (1, 2)
+    """
 
     price: int
     rent_values: tuple[int, ...]
     group: str
     mortgage_value: int
+    kind: str = PropertyKind.STREET
+    house_cost: int = 0
+    unmortgage_cost: int = 0
+    # Aluguel sem casas quando o dono tem o grupo completo (só ruas)
+    monopoly_rent: int | None = None
 
     def __post_init__(self) -> None:
         if self.price < 0:
@@ -74,6 +94,12 @@ class Board:
             tile.tile_id: position
             for position, tile in enumerate(self._tiles)
         }
+        self._property_tiles = tuple(
+            tile for tile in self._tiles if isinstance(tile, PropertyTile)
+        )
+        self._groups: dict[str, tuple[PropertyTile, ...]] = {}
+        for tile in self._property_tiles:
+            self._groups[tile.group] = self._groups.get(tile.group, ()) + (tile,)
 
     @property
     def tiles(self) -> tuple[Tile, ...]:
@@ -86,6 +112,14 @@ class Board:
     def get_tile(self, position: int) -> Tile:
         """Obtém a casa pela posição, considerando o circuito circular."""
         return self._tiles[position % self.size]
+
+    @property
+    def property_tiles(self) -> tuple[PropertyTile, ...]:
+        """Imóveis na ordem do tabuleiro."""
+        return self._property_tiles
+
+    def group_members(self, group: str) -> tuple[PropertyTile, ...]:
+        return self._groups[group]
 
     def get_tile_by_id(self, tile_id: int) -> Tile:
         """Obtém uma casa por seu identificador."""

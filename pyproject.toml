@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monopoly-ai"
+version = "0.1.0"
+description = "Engine de Banco Imobiliário (Monopoly), análises e ambientes para pesquisa em IA"
+readme = "readme.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+envs = ["gymnasium>=1.0", "pettingzoo>=1.24"]
+dev = ["monopoly-ai[envs]", "pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # Avisos esperados dos checadores para observações em dict com action_mask
+    "ignore:Observation is not a NumPy array:UserWarning",
+    "ignore:Observation space for each agent probably should be:UserWarning",
+    "ignore:.*Box observation space maximum value is infinity.*:UserWarning",
+]

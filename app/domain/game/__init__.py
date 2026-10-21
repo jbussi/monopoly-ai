@@ -1,4 +1,5 @@
 from .actions import (
+    ActionType,
     GameAction
 )
 
@@ -32,6 +33,7 @@ from .game_manager import (
 )
 
 from .game_state import (
+    Debt,
     PlayerState,
     PieceState,
     PropertyState,
@@ -48,10 +50,14 @@ from .player import (
 
 from .rules import (
     Rules,
-    ClassicRules
+    ClassicRules,
+    ConfiguredRules
 )
 
 __all__ = [
+    "ActionType",
+    "Debt",
+    "ConfiguredRules",
     "GameAction",
     "BaseController",
     "Board",
