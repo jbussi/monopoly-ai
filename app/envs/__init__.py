@@ -3,7 +3,6 @@
 from .action_space import DiscreteActionSpace
 from .baselines import GreedyPolicy, Policy, RandomPolicy
 from .encoding import ObservationEncoder
-from .gymnasium_env import MonopolyGymEnv
 from .rewards import RewardFn, win_loss_reward
 from .text import describe_action, render_text
 
@@ -22,3 +21,12 @@ __all__ = [
     "render_text",
     "win_loss_reward",
 ]
+
+
+def __getattr__(name: str):
+    """Carrega o adaptador Gymnasium somente quando ele é solicitado."""
+    if name == "MonopolyGymEnv":
+        from .gymnasium_env import MonopolyGymEnv
+
+        return MonopolyGymEnv
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

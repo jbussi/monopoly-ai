@@ -52,6 +52,11 @@ class Rules(ABC):
         return 10
 
     @property
+    def go_to_jail_position(self) -> int:
+        """Posição que envia o jogador diretamente à prisão."""
+        return 30
+
+    @property
     def max_houses_in_bank(self) -> int:
         return 32
 
@@ -114,6 +119,7 @@ class ConfiguredRules(Rules):
     max_consecutive_doubles_value: int = 3
     max_jail_attempts_value: int = 3
     auction_enabled: bool = True
+    go_to_jail_position_value: int = 30
     jail_position_value: int = 10
     max_houses_value: int = 32
     max_hotels_value: int = 12
@@ -150,6 +156,10 @@ class ConfiguredRules(Rules):
     @property
     def jail_position(self) -> int:
         return self.jail_position_value
+
+    @property
+    def go_to_jail_position(self) -> int:
+        return self.go_to_jail_position_value
 
     @property
     def max_houses_in_bank(self) -> int:

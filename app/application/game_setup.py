@@ -42,10 +42,10 @@ def load_selected_game() -> GameConfig:
 
 def build_board(config: GameConfig) -> Board:
     """Converte as definições da variante em casas do domínio."""
-    return Board([_build_tile(space) for space in config.board])
+    return Board([_build_tile(space, config.settings) for space in config.board])
 
 
-def _build_tile(space: BoardSpace) -> Tile:
+def _build_tile(space: BoardSpace, settings: GameSettings) -> Tile:
     if isinstance(space, PropertyDefinition):
         rent = space.rent
         return PropertyTile(
@@ -87,11 +87,18 @@ def _build_tile(space: BoardSpace) -> Tile:
         )
 
     if isinstance(space, TaxDefinition):
+        amount = space.amount
+        percent_option = space.percent_option
+        if space.tax_type == "income":
+            amount = settings.income_tax_amount
+            percent_option = settings.income_tax_percent
+        elif space.tax_type == "luxury":
+            amount = settings.luxury_tax_amount
         return TaxTile(
             tile_id=space.position,
             name=space.name,
-            tax_amount=space.amount,
-            percent_option=space.percent_option,
+            tax_amount=amount,
+            percent_option=percent_option,
         )
 
     return SpecialTile(tile_id=space.position, name=space.name, tile_type=space.type)
@@ -105,6 +112,7 @@ def build_rules(settings: GameSettings, max_turns: int | None = None,
         jail_fine_value=settings.jail_fine,
         max_jail_attempts_value=settings.jail_max_turns,
         auction_enabled=settings.auction_enabled if auction_enabled is None else auction_enabled,
+        go_to_jail_position_value=settings.go_to_jail_position,
         jail_position_value=settings.jail_position,
         max_houses_value=settings.max_houses_in_bank,
         max_hotels_value=settings.max_hotels_in_bank,
@@ -128,6 +136,17 @@ def create_game(
     seed com as mesmas ações reproduz a mesma partida.
     """
     config = config or load_selected_game()
+    player_count = len(player_names)
+    if player_count < config.settings.min_players_to_start:
+        raise ValueError(
+            f"A partida precisa de pelo menos "
+            f"{config.settings.min_players_to_start} jogadores."
+        )
+    if player_count > config.settings.max_players:
+        raise ValueError(
+            f"A variante permite no máximo {config.settings.max_players} jogadores."
+        )
+
     rng = random.Random(seed)
 
     players = [Player(name, player_id=_uuid(rng)) for name in player_names]
