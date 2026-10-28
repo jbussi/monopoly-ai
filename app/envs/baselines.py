@@ -66,6 +66,13 @@ class GreedyPolicy:
                 return by_kind[ActionType.AUCTION_DEBT_PROPERTY][0]
             return GameAction(ActionType.DECLARE_BANKRUPTCY)
 
+        if phase == GameLoop.RESOLVE_MORTGAGE_TRANSFER:
+            for action in by_kind.get(ActionType.REDEEM_MORTGAGE, []):
+                tile = game.board.get_tile_by_id(action.payload["tile_id"])
+                if state.money - loop.unmortgage_cost(tile) >= self.reserve:
+                    return action
+            return by_kind[ActionType.KEEP_MORTGAGE][0]
+
         if phase == GameLoop.AUCTION:
             tile = game.board.get_tile_by_id(loop.pending_tile_id)
             for bid in by_kind.get(ActionType.AUCTION_BID, []):

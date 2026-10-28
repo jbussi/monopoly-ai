@@ -47,11 +47,11 @@ Simplificações do motor e escopo do contrato RL `monopoly_v1`:
 | Negociação entre jogadores (`tradeEnabled`) | Disponível no motor; o contrato RL `monopoly_v1` mantém negociação desligada |
 | Gerenciar imóveis fora do próprio turno | Só como devedor (`RESOLVE_DEBT`) |
 | Levantar dinheiro durante um leilão | Não; o lance é limitado ao dinheiro em caixa |
-| Falência com o banco como credor | Imóveis voltam ao banco, sem leilão |
+| Destino dos bens na falência (`bankruptcyToBank`) | Quando ativo, o dinheiro restante vai ao banco e os imóveis retornam sem hipoteca e são leiloados; é o comportamento configurado em `classic_us` |
 | Falência com vários credores (ex.: "pague $50 a cada jogador") | Bens vão para o banco |
-| Juros de 10% ao herdar imóvel hipotecado | Não cobrados |
-| Desfazer hotel sem 4 casas no banco | Proibido |
-| `freeParkingJackpot`, `bankruptcyToBank`, `auctionTimeoutSeconds` | Ignorados pela engine |
+| Imóvel hipotecado transferido | O novo dono escolhe pagar 10% para manter a hipoteca ou resgatá-la imediatamente por `unmortgageCost` |
+| Vender hotel sem 4 casas no banco | Permitido; registra escassez e compensa devoluções futuras |
+| `auctionTimeoutSeconds` | Ignorado pela engine |
 
 **Truncamento:** com `max_turns` (padrão 1000 nos ambientes), a partida termina sem
 vencedor. Sem negociação, monopólios são raros: entre 4 jogadores `GreedyPolicy`, cerca
@@ -69,6 +69,7 @@ num leilão é quem tem a vez de dar lance; numa dívida, é o devedor (ex.: car
 | `AUCTION` | `AUCTION_BID {amount}`, `AUCTION_WITHDRAW` |
 | `AFTER_ROLL` | `END_TURN`; gerenciamento |
 | `RESOLVE_DEBT` | `SELL_HOUSE`, `MORTGAGE`; a falência pode ocorrer automaticamente quando a liquidação estimada não cobre a dívida |
+| `RESOLVE_MORTGAGE_TRANSFER` | O recebedor escolhe manter a hipoteca pagando 10% ou resgatá-la imediatamente pelo `unmortgageCost` |
 | `GAME_OVER` | nenhuma |
 
 "Gerenciamento" = `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE` e `UNMORTGAGE`, todas com `{tile_id}`.
@@ -86,15 +87,17 @@ após a oferta inicial (`tradeMaxCounteroffers` em `settings.json`). O máximo d
 por turno limita o volume de novas ofertas; só pode haver uma negociação pendente.
 
 Aceitar revalida todos os itens e transfere dinheiro, propriedades e cartas numa única
-operação. Propriedades hipotecadas mantêm a hipoteca e são transferidas com a obrigação de
-resgate definida pelo `unmortgageCost` do tabuleiro. Não se pode negociar uma propriedade
+operação. Se uma propriedade hipotecada for transferida, o novo dono decide imediatamente
+entre mantê-la hipotecada pagando 10% do valor hipotecário ao banco, ou resgatá-la pagando o
+`unmortgageCost`. A negociação pausa até essa decisão; se os juros não puderem ser pagos,
+abre-se o fluxo normal de dívidas. Não se pode negociar uma propriedade
 enquanto houver construções em qualquer imóvel do seu grupo de cor; primeiro, todas as
 construções do grupo devem ser vendidas ao banco.
 
 As ofertas e contrapropostas usam ações estruturadas `GameAction`, cujos termos não cabem
-no espaço discreto fixo `monopoly_v1`. Por isso os ambientes Gymnasium/PettingZoo atuais
-continuam com as trocas desabilitadas; integrar trocas no RL exige uma versão nova do
-contrato de ações e observações. No motor, `available_trade_actions()` informa os comandos
+no espaço discreto fixo `monopoly_v1`. Os adaptadores v1 mantêm as trocas desabilitadas;
+os adaptadores v2 descritos abaixo expõem esses comandos em ações estruturadas. No motor,
+`available_trade_actions()` informa os comandos
 estruturados disponíveis, e `trade_response_actions()` enumera aceitar, rejeitar e
 contrapropor; `validate()` e `process_action()` verificam os termos concretos.
 
@@ -108,10 +111,17 @@ negociar com até `debtNegotiationsPerPlayer` jogadores distintos (configuraçã
 encerrando explicitamente essa etapa, e então leiloar propriedades sem construções. Cada
 leilão exclui o devedor, e o valor vencedor é creditado a ele para quitar as dívidas na ordem
 em que surgiram. A falência só fica disponível depois do encerramento das negociações e
-quando não restam ações bancárias nem imóveis elegíveis para leilão. Cada oferta pendente
+quando não restam ações bancárias nem imóveis elegíveis para leilão. Com `bankruptcyToBank`
+ativo, na falência o dinheiro restante é entregue ao banco e os imóveis restantes retornam
+sem hipoteca e são leiloados individualmente aos jogadores ativos. O dinheiro não é leiloado;
+ele é entregue ao banco. A observação v2 identifica os leilões de imóveis em
+`auction.is_bankruptcy_auction`. Cada oferta pendente
 interrompe a partida até ser aceita, rejeitada ou respondida com contraproposta, limitada por
-`tradeMaxCounteroffers`. As versões Gymnasium/PettingZoo preservam o espaço discreto legado
-com as funcionalidades de insolvência avançadas desabilitadas.
+`tradeMaxCounteroffers`. Os adaptadores v1 mantêm o espaço discreto legado e desabilitam as
+funcionalidades avançadas; os adaptadores v2 as expõem.
+
+O vetor `rules` da observação v2 termina com `bankruptcyToBank` e a taxa de juros de
+transferência hipotecária (0.10), nessa ordem.
 
 ## Espaço de ações: `Discrete(124)`
 
@@ -190,9 +200,60 @@ Uma política é qualquer callable `policy(loop) -> GameAction`. `RandomPolicy` 
 
 ## Versionamento
 
-O ambiente se chama `monopoly_v1` (`app.envs.ENV_VERSION`). Expansões como a negociação
-mudam o espaço de ações e/ou de observação e entram como **v2**, com estas regras:
+O ambiente legado se chama `monopoly_v1` (`app.envs.ENV_VERSION`). O contrato estruturado
+completo se chama `monopoly_v2` (`app.envs.ENV_VERSION_V2`). Mudanças futuras que afetem
+espaço de ações ou observações devem seguir estas regras:
 
 1. Blocos de ação novos só são **acrescentados no final**.
 2. Campos novos de observação entram **no final** do vetor.
 3. Regras novas ficam atrás de flags (`settings.json` / `Rules`), e a v1 continua disponível.
+
+## Ambiente v2: regras completas e ações estruturadas
+
+`MonopolyGymEnvV2` (`app.envs.gymnasium_env_v2`) e `pettingzoo_env_v2.env()` usam a
+configuração integral da engine, inclusive trocas e resolução avançada de insolvência.
+Aceitam partidas de 2 a 12 jogadores (`max_players` também determina o tamanho fixo dos
+vetores de jogadores). A v1 permanece disponível e continua usando `Discrete(124)`.
+
+A observação v2 é um `Dict` com estado e `action_mask`. O estado separa jogadores,
+propriedades, características estáticas do tabuleiro, fase, leilão, transferência hipotecária
+pendente, ledger ordenado de dívidas, progresso da insolvência, oferta pendente, regras e estoque de casas/hotéis,
+incluindo `house_shortage`. Slots de jogadores são relativos ao observador: slot 0 é o
+próprio jogador. As cartas de prisão, propriedades oferecidas e participantes de leilão
+também são visíveis; a ordem oculta dos baralhos continua privada.
+
+A ação v2 é um `Dict` com os seguintes campos:
+
+| Campo | Uso |
+|---|---|
+| `action_type` | Uma das 21 ações listadas abaixo, por índice estável |
+| `target_player` | Assento relativo (1 = próximo jogador); `max_players` é o sentinela |
+| `tile_id` | ID de casa do tabuleiro; `board_size` é o sentinela |
+| `amount` | Lance inteiro do leilão |
+| `money_offered`, `money_requested` | Valores inteiros para oferta/contraproposta |
+| `offered_properties`, `requested_properties` | Vetores MultiBinary na ordem de `action_map.tile_ids` |
+| `offered_jail_cards`, `requested_jail_cards` | Vetores MultiBinary na ordem de `action_map.jail_card_ids` |
+
+Tipos em índices estáveis de 0 a 20: `ROLL_DICE`, `BUY_PROPERTY`, `DECLINE_PROPERTY`,
+`END_TURN`, `PAY_JAIL_FINE`, `USE_JAIL_CARD`, `DECLARE_BANKRUPTCY`, `AUCTION_WITHDRAW`,
+`AUCTION_BID`, `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE`, `UNMORTGAGE`, `PROPOSE_TRADE`,
+`ACCEPT_TRADE`, `REJECT_TRADE`, `COUNTER_TRADE`, `END_DEBT_NEGOTIATIONS`,
+`AUCTION_DEBT_PROPERTY`, `KEEP_MORTGAGE`, `REDEEM_MORTGAGE`. As duas ações novas são
+acrescentadas ao final, nos índices 19 e 20; a ordem é mantida em `ACTION_TYPES`.
+
+`StructuredActionSpace.action_mask()` devolve máscaras para o tipo, destinatário,
+imóvel e itens de troca, além de limites inclusivos de dinheiro. Para ações condicionais,
+uma política autoregressiva pode pedir máscaras sucessivas passando `action_type`,
+`target_player_index`, `money_offered` e `money_requested`. Os limites numéricos reduzem o
+intervalo de lances e valores de dinheiro sem enumerar cada dólar. A validação final é
+sempre feita por `GameLoop.validate()` ao processar a ação, então agentes devem respeitar
+as máscaras e descartar ações rejeitadas.
+
+Gymnasium v2 retorna o estado e as máscaras dentro da observação; `env.action_masks()`
+também pode recalcular a máscara condicional para uma política autoregressiva. PettingZoo
+v2 usa o mesmo contrato em cada turno AEC; a máscara condicional pode ser recalculada por
+`env.unwrapped.action_mask(agent, ...)`. O espaço estruturado requer uma política/modelo
+capaz de produzir campos condicionais; não é compatível diretamente com políticas que só
+emitem o índice discreto da v1. O `check_env` oficial do Gymnasium amostra ações sem usar
+essa máscara; para esse diagnóstico, crie o ambiente com `on_illegal="terminate"`. Em uso
+normal, `on_illegal="raise"` ajuda a detectar políticas que enviam ações inválidas.

@@ -94,6 +94,11 @@ class Rules(ABC):
     def debt_negotiations_per_player(self) -> int:
         return 3
 
+    @property
+    def bankruptcy_to_bank(self) -> bool:
+        """Whether residual bankruptcy assets return to the bank for auction."""
+        return False
+
 
 class ClassicRules(Rules):
     """Implementa as regras tradicionais adotadas nesta versão."""
@@ -146,6 +151,7 @@ class ConfiguredRules(Rules):
     trade_max_counteroffers_value: int = 3
     debt_resolution_enabled_value: bool = True
     debt_negotiations_per_player_value: int = 3
+    bankruptcy_to_bank_value: bool = False
 
     @property
     def starting_money(self) -> int:
@@ -212,6 +218,10 @@ class ConfiguredRules(Rules):
     @property
     def debt_negotiations_per_player(self) -> int:
         return self.debt_negotiations_per_player_value
+
+    @property
+    def bankruptcy_to_bank(self) -> bool:
+        return self.bankruptcy_to_bank_value
 
     @property
     def max_turns(self) -> int | None:

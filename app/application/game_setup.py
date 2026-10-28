@@ -132,6 +132,7 @@ def build_rules(settings: GameSettings, max_turns: int | None = None,
             else debt_resolution_enabled
         ),
         debt_negotiations_per_player_value=settings.debt_negotiations_per_player,
+        bankruptcy_to_bank_value=settings.bankruptcy_to_bank,
     )
 
 

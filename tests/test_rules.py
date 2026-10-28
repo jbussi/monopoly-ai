@@ -215,7 +215,7 @@ def test_debt_resolution_by_mortgage(make_game):
     assert money(loop, 0) == 2 + 50 - 4 and money(loop, 1) == 1504
 
 
-def test_insolvent_player_can_auction_before_bankruptcy_to_creditor(make_game):
+def test_insolvent_player_can_auction_before_bankruptcy(make_game):
     loop = make_game(dice=[1, 2])
     own(loop, 1, BALTIC)
     own(loop, 0, ORIENTAL)
@@ -234,11 +234,17 @@ def test_insolvent_player_can_auction_before_bankruptcy_to_creditor(make_game):
     assert loop.current_decision_player_id == creditor
     act(loop, A.AUCTION_BID, amount=1)
     assert loop.game.property_states[ORIENTAL].owner_id == creditor
+    assert loop.turn_phase == GameLoop.RESOLVE_MORTGAGE_TRANSFER
+    interest = (
+        loop.game.board.get_tile_by_id(ORIENTAL).mortgage_value * 10 + 99
+    ) // 100
+    act(loop, A.KEEP_MORTGAGE, tile_id=ORIENTAL)
+    assert money(loop, 1) == 1500 - 1 - interest
     assert loop.turn_phase == GameLoop.RESOLVE_DEBT
     act(loop, A.DECLARE_BANKRUPTCY)
     assert game.player_states[debtor].is_bankrupt
     assert game.game_over and game.winner_id == creditor
-    assert money(loop, 1) >= 1500
+    assert money(loop, 1) == 1500 - 1 - interest
 
 
 def test_hotel_can_be_sold_without_house_inventory_during_debt(make_game):

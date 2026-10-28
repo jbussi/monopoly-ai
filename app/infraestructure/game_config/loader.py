@@ -369,7 +369,6 @@ def _parse_settings(raw: dict[str, Any]) -> GameSettings:
         auction_enabled=boolean("auctionEnabled"),
         auction_min_bid=integer("auctionMinBid"),
         auction_timeout_seconds=integer("auctionTimeoutSeconds"),
-        free_parking_jackpot=boolean("freeParkingJackpot"),
         max_players=integer("maxPlayers"),
         min_players_to_start=integer("minPlayersToStart"),
         allow_spectators=boolean("allowSpectators"),

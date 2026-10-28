@@ -96,7 +96,6 @@ class GameSettings:
     auction_min_bid: int
     auction_timeout_seconds: int
 
-    free_parking_jackpot: bool
     max_players: int
     min_players_to_start: int
     allow_spectators: bool

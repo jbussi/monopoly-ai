@@ -20,8 +20,6 @@
   "auctionMinBid": 1,
   "auctionTimeoutSeconds": 30,
 
-  "freeParkingJackpot": false,
-
   "maxPlayers": 12,
   "minPlayersToStart": 2,
 

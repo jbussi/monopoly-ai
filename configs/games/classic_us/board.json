@@ -299,7 +299,7 @@
     "position": 20,
     "type": "free_parking",
     "name": "Free Parking",
-    "description": "Take a break! Nothing happens here (unless the jackpot rule is enabled)."
+    "description": "Take a break! Nothing happens here."
   },
   {
     "position": 21,
