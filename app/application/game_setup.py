@@ -64,6 +64,7 @@ def _build_tile(space: BoardSpace, settings: GameSettings) -> Tile:
             mortgage_value=space.mortgage,
             kind=PropertyKind.STREET,
             house_cost=space.house_cost,
+            hotel_cost=space.hotel_cost,
             unmortgage_cost=space.unmortgage_cost,
             monopoly_rent=rent.monopoly,
         )
@@ -105,7 +106,9 @@ def _build_tile(space: BoardSpace, settings: GameSettings) -> Tile:
 
 
 def build_rules(settings: GameSettings, max_turns: int | None = None,
-                auction_enabled: bool | None = None) -> ConfiguredRules:
+                auction_enabled: bool | None = None,
+                trade_enabled: bool | None = None,
+                debt_resolution_enabled: bool | None = None) -> ConfiguredRules:
     return ConfiguredRules(
         starting_money_value=settings.starting_money,
         go_salary_value=settings.go_salary,
@@ -119,6 +122,16 @@ def build_rules(settings: GameSettings, max_turns: int | None = None,
         auction_min_bid_value=settings.auction_min_bid,
         income_tax_choice_value=settings.income_tax_choice,
         max_turns_value=max_turns,
+        trade_enabled_value=(
+            settings.trade_enabled if trade_enabled is None else trade_enabled
+        ),
+        trade_max_counteroffers_value=settings.trade_max_counteroffers,
+        debt_resolution_enabled_value=(
+            settings.debt_resolution_enabled
+            if debt_resolution_enabled is None
+            else debt_resolution_enabled
+        ),
+        debt_negotiations_per_player_value=settings.debt_negotiations_per_player,
     )
 
 
@@ -128,6 +141,8 @@ def create_game(
     seed: int | None = None,
     max_turns: int | None = None,
     auction_enabled: bool | None = None,
+    trade_enabled: bool | None = None,
+    debt_resolution_enabled: bool | None = None,
     record_events: bool = True,
 ) -> GameLoop:
     """Monta uma partida pronta para receber ações.
@@ -162,7 +177,10 @@ def create_game(
         players=players,
         pieces=pieces,
         board=build_board(config),
-        rules=build_rules(config.settings, max_turns, auction_enabled),
+        rules=build_rules(
+            config.settings, max_turns, auction_enabled, trade_enabled,
+            debt_resolution_enabled,
+        ),
         dice=StandardDice(seed=rng.getrandbits(32)),
         decks=decks,
         record_events=record_events,

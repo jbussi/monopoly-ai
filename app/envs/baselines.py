@@ -31,6 +31,8 @@ class RandomPolicy:
         self.rng.seed(seed)
 
     def __call__(self, loop: GameLoop) -> GameAction:
+        if loop.game.pending_trade is not None:
+            return GameAction(ActionType.REJECT_TRADE)
         return self.rng.choice(loop.legal_actions())
 
 
@@ -42,6 +44,8 @@ class GreedyPolicy:
         self.reserve = reserve
 
     def __call__(self, loop: GameLoop) -> GameAction:
+        if loop.game.pending_trade is not None:
+            return GameAction(ActionType.REJECT_TRADE)
         legal = loop.legal_actions()
         by_kind: dict[str, list[GameAction]] = {}
         for action in legal:
@@ -56,6 +60,10 @@ class GreedyPolicy:
             for kind in (ActionType.MORTGAGE, ActionType.SELL_HOUSE):
                 if kind in by_kind:
                     return by_kind[kind][0]
+            if ActionType.END_DEBT_NEGOTIATIONS in by_kind:
+                return by_kind[ActionType.END_DEBT_NEGOTIATIONS][0]
+            if ActionType.AUCTION_DEBT_PROPERTY in by_kind:
+                return by_kind[ActionType.AUCTION_DEBT_PROPERTY][0]
             return GameAction(ActionType.DECLARE_BANKRUPTCY)
 
         if phase == GameLoop.AUCTION:

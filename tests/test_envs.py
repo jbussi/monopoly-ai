@@ -56,7 +56,10 @@ def test_gymnasium_episode_against_greedy():
 
 
 def test_mask_matches_engine(config):
-    loop = create_game(["A", "B", "C"], config, seed=2, max_turns=1000)
+    loop = create_game(
+        ["A", "B", "C"], config, seed=2, max_turns=1000,
+        trade_enabled=False, debt_resolution_enabled=False,
+    )
     space = DiscreteActionSpace(loop.game.board)
     rng = np.random.default_rng(2)
     for _ in range(2000):

@@ -101,6 +101,9 @@ class GameSettings:
     min_players_to_start: int
     allow_spectators: bool
     trade_enabled: bool
+    trade_max_counteroffers: int
+    debt_resolution_enabled: bool
+    debt_negotiations_per_player: int
     bankruptcy_to_bank: bool
 
     player_colors: tuple[dict[str, Any], ...]

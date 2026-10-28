@@ -10,6 +10,7 @@ from .dice import DiceMechanism, DiceRoll
 from .pieces import Piece
 from .player import Player
 from .rules import Rules
+from .trade import TradeNegotiation, TradeOffer
 
 HOTEL_LEVEL = 5
 
@@ -49,6 +50,17 @@ class Debt:
     debtor_id: UUID
     creditor_id: UUID | None  # None = banco
     amount: int
+
+
+@dataclass
+class DebtResolutionState:
+    """Bounded negotiation and property-auction progress for one debtor."""
+
+    debtor_id: UUID
+    negotiations_started: int = 0
+    negotiation_player_ids: set[UUID] = field(default_factory=set)
+    negotiations_closed: bool = False
+    auctioned_property_ids: set[int] = field(default_factory=set)
 
 
 class GameState:
@@ -119,6 +131,11 @@ class GameState:
         self.turn_counter: int = 1
         self.last_roll: DiceRoll | None = None
         self.debts: list[Debt] = []
+        self.debt_resolution: DebtResolutionState | None = None
+        self.house_shortage: int = 0
+        self.pending_trade: TradeNegotiation | None = None
+        self.trade_history: list[TradeOffer] = []
+        self.next_trade_id: int = 1
 
         self.game_over: bool = False
         self.winner_id: UUID | None = None
@@ -192,6 +209,20 @@ class GameState:
     def amount_owed(self, player_id: UUID) -> int:
         return sum(debt.amount for debt in self.debts if debt.debtor_id == player_id)
 
+    def return_houses_to_bank(self, count: int) -> None:
+        """Return house pieces, first satisfying any virtual-house shortage."""
+        count = max(0, count)
+        shortage_paid = min(count, self.house_shortage)
+        self.house_shortage -= shortage_paid
+        self.houses_in_bank += count - shortage_paid
+
+    def supply_houses_for_hotel_sale(self, count: int) -> None:
+        """Convert a hotel to houses, recording any pieces the bank cannot supply."""
+        count = max(0, count)
+        supplied = min(count, self.houses_in_bank)
+        self.houses_in_bank -= supplied
+        self.house_shortage += count - supplied
+
     def rent_for(self, tile: PropertyTile, dice_total: int | None = None) -> int:
         """Aluguel devido ao cair na propriedade (sem multiplicadores de cartas)."""
         state = self.property_states[tile.tile_id]
@@ -225,7 +256,10 @@ class GameState:
         total = 0
         for tile in self.owned_tiles(player_id):
             state = self.property_states[tile.tile_id]
-            total += state.houses * (tile.house_cost // 2)
+            if state.houses == HOTEL_LEVEL:
+                total += 4 * (tile.house_cost // 2) + ((tile.hotel_cost or tile.house_cost) // 2)
+            else:
+                total += state.houses * (tile.house_cost // 2)
             if not state.is_mortgaged:
                 total += tile.mortgage_value
         return total

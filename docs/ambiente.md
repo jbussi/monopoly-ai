@@ -40,11 +40,11 @@ Quando um valor aparece nos dois arquivos, o motor usa `settings.json`.
 - hipoteca e custo para levantá-la (`unmortgageCost`);
 - resolução de dívida (vender construções ou hipotecar) e falência.
 
-Simplificações da v1:
+Simplificações do motor e escopo do contrato RL `monopoly_v1`:
 
 | Regra | v1 |
 |---|---|
-| Negociação entre jogadores (`tradeEnabled`) | **Não implementada** |
+| Negociação entre jogadores (`tradeEnabled`) | Disponível no motor; o contrato RL `monopoly_v1` mantém negociação desligada |
 | Gerenciar imóveis fora do próprio turno | Só como devedor (`RESOLVE_DEBT`) |
 | Levantar dinheiro durante um leilão | Não; o lance é limitado ao dinheiro em caixa |
 | Falência com o banco como credor | Imóveis voltam ao banco, sem leilão |
@@ -64,7 +64,7 @@ num leilão é quem tem a vez de dar lance; numa dívida, é o devedor (ex.: car
 
 | Fase | Ações |
 |---|---|
-| `BEFORE_ROLL` | `ROLL_DICE`; na prisão também `PAY_JAIL_FINE` e `USE_JAIL_CARD`; gerenciamento |
+| `BEFORE_ROLL` | janela de negociação (se habilitada); `ROLL_DICE`; na prisão também `PAY_JAIL_FINE` e `USE_JAIL_CARD`; gerenciamento |
 | `AWAITING_PROPERTY_DECISION` | `BUY_PROPERTY` (se tiver dinheiro), `DECLINE_PROPERTY`; gerenciamento |
 | `AUCTION` | `AUCTION_BID {amount}`, `AUCTION_WITHDRAW` |
 | `AFTER_ROLL` | `END_TURN`; gerenciamento |
@@ -76,11 +76,42 @@ Um turno tem várias decisões do mesmo agente. Uma dívida é paga automaticame
 o devedor tem dinheiro suficiente; caso contrário, pode vender construções ou hipotecar
 imóveis. Se o valor estimado de liquidação não cobrir a dívida, a falência é imediata.
 
-**Limitação conhecida da v1:** a estimativa de liquidação conta o valor de hotéis sem
-considerar se há quatro casas disponíveis para vendê-los. Como a venda de hotel é bloqueada
-quando o banco não tem quatro casas, certos estados de dívida podem ficar sem ação legal.
-Esse caso foi identificado na revisão e deve ser considerado ao avaliar a release; a
-revisão das regras de dívida está planejada para a v2.
+### Negociações no motor
+
+Com `tradeEnabled: true`, cada turno abre uma janela antes dos dados. O jogador da vez pode
+enviar uma oferta estruturada com dinheiro, propriedades e cartas de saída da prisão; o
+destinatário responde aceitando, rejeitando ou contrapondo. A janela pausa até a resposta,
+e a rolagem encerra a negociação daquele turno. O limite padrão é de três contrapropostas
+após a oferta inicial (`tradeMaxCounteroffers` em `settings.json`). O máximo de uma janela
+por turno limita o volume de novas ofertas; só pode haver uma negociação pendente.
+
+Aceitar revalida todos os itens e transfere dinheiro, propriedades e cartas numa única
+operação. Propriedades hipotecadas mantêm a hipoteca e são transferidas com a obrigação de
+resgate definida pelo `unmortgageCost` do tabuleiro. Não se pode negociar uma propriedade
+enquanto houver construções em qualquer imóvel do seu grupo de cor; primeiro, todas as
+construções do grupo devem ser vendidas ao banco.
+
+As ofertas e contrapropostas usam ações estruturadas `GameAction`, cujos termos não cabem
+no espaço discreto fixo `monopoly_v1`. Por isso os ambientes Gymnasium/PettingZoo atuais
+continuam com as trocas desabilitadas; integrar trocas no RL exige uma versão nova do
+contrato de ações e observações. No motor, `available_trade_actions()` informa os comandos
+estruturados disponíveis, e `trade_response_actions()` enumera aceitar, rejeitar e
+contrapropor; `validate()` e `process_action()` verificam os termos concretos.
+
+Na liquidação, um hotel pode ser vendido mesmo quando o banco não tem quatro casas físicas
+disponíveis. O motor registra essa falta em `GameState.house_shortage`; casas devolvidas
+posteriormente primeiro compensam a escassez, antes de aumentar o estoque físico do banco.
+Assim a venda do hotel não fica bloqueada e o estoque nunca fica negativo.
+
+Quando uma dívida é aberta, o jogador pode vender construções e hipotecar imóveis ao banco,
+negociar com até `debtNegotiationsPerPlayer` jogadores distintos (configuração atual: 3),
+encerrando explicitamente essa etapa, e então leiloar propriedades sem construções. Cada
+leilão exclui o devedor, e o valor vencedor é creditado a ele para quitar as dívidas na ordem
+em que surgiram. A falência só fica disponível depois do encerramento das negociações e
+quando não restam ações bancárias nem imóveis elegíveis para leilão. Cada oferta pendente
+interrompe a partida até ser aceita, rejeitada ou respondida com contraproposta, limitada por
+`tradeMaxCounteroffers`. As versões Gymnasium/PettingZoo preservam o espaço discreto legado
+com as funcionalidades de insolvência avançadas desabilitadas.
 
 ## Espaço de ações: `Discrete(124)`
 

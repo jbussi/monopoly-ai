@@ -40,6 +40,11 @@ from .game_state import (
     GameState
 )
 
+from .trade import (
+    TradeNegotiation,
+    TradeOffer,
+)
+
 from .pieces import (
     Piece
 )
@@ -74,6 +79,8 @@ __all__ = [
     "PieceState",
     "PropertyState",
     "GameState",
+    "TradeNegotiation",
+    "TradeOffer",
     "Piece",
     "Player",
     "Rules",

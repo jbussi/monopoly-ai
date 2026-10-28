@@ -4,7 +4,7 @@ from app.application.game_setup import create_game
 from app.domain.game.actions import ActionType as A
 from app.domain.game.actions import GameAction
 from app.domain.game.game_loop import GameLoop
-from app.domain.game.game_state import HOTEL_LEVEL
+from app.domain.game.game_state import Debt, HOTEL_LEVEL
 
 from .conftest import act
 
@@ -205,17 +205,17 @@ def test_debt_resolution_by_mortgage(make_game):
     act(loop, A.ROLL_DICE)
     assert loop.turn_phase == GameLoop.RESOLVE_DEBT
     kinds = {a.action_type for a in loop.legal_actions()}
-    assert kinds == {A.MORTGAGE}
+    assert kinds == {A.MORTGAGE, A.END_DEBT_NEGOTIATIONS}
     result = loop.process_action(GameAction(A.DECLARE_BANKRUPTCY))
     assert result["status"] == "REJECTED"
-    assert "recursos suficientes" in result["reason"]
+    assert "Encerre as negociações" in result["reason"]
     assert not loop.game.player_states[ids(loop)[0]].is_bankrupt
     act(loop, A.MORTGAGE, tile_id=ORIENTAL)
     assert loop.turn_phase == GameLoop.AFTER_ROLL
     assert money(loop, 0) == 2 + 50 - 4 and money(loop, 1) == 1504
 
 
-def test_insolvent_player_goes_bankrupt_to_creditor(make_game):
+def test_insolvent_player_can_auction_before_bankruptcy_to_creditor(make_game):
     loop = make_game(dice=[1, 2])
     own(loop, 1, BALTIC)
     own(loop, 0, ORIENTAL)
@@ -223,10 +223,54 @@ def test_insolvent_player_goes_bankrupt_to_creditor(make_game):
     loop.game.player_states[ids(loop)[0]].money = 1
     act(loop, A.ROLL_DICE)
     game = loop.game
-    assert game.game_over and game.winner_id == ids(loop)[1]
-    assert game.property_states[ORIENTAL].owner_id == ids(loop)[1]
-    assert game.property_states[ORIENTAL].is_mortgaged
-    assert money(loop, 1) == 1501
+    debtor, creditor = ids(loop)[:2]
+    assert not game.player_states[debtor].is_bankrupt
+    act(loop, A.END_DEBT_NEGOTIATIONS)
+    assert any(
+        action.action_type == A.AUCTION_DEBT_PROPERTY and action.payload["tile_id"] == ORIENTAL
+        for action in loop.legal_actions()
+    )
+    act(loop, A.AUCTION_DEBT_PROPERTY, tile_id=ORIENTAL)
+    assert loop.current_decision_player_id == creditor
+    act(loop, A.AUCTION_BID, amount=1)
+    assert loop.game.property_states[ORIENTAL].owner_id == creditor
+    assert loop.turn_phase == GameLoop.RESOLVE_DEBT
+    act(loop, A.DECLARE_BANKRUPTCY)
+    assert game.player_states[debtor].is_bankrupt
+    assert game.game_over and game.winner_id == creditor
+    assert money(loop, 1) >= 1500
+
+
+def test_hotel_can_be_sold_without_house_inventory_during_debt(make_game):
+    loop = make_game()
+    debtor, creditor = ids(loop)
+    tile = loop.game.board.property_tiles[0]
+    loop.game.property_states[tile.tile_id].owner_id = debtor
+    loop.game.property_states[tile.tile_id].houses = 5
+    loop.game.houses_in_bank = 0
+    loop.game.player_states[debtor].money = 0
+    loop.game.debts.append(Debt(debtor, creditor, 500))
+    loop.turn_phase = GameLoop.RESOLVE_DEBT
+
+    actions = loop.legal_actions()
+    assert A.SELL_HOUSE in {action.action_type for action in actions}
+    assert A.DECLARE_BANKRUPTCY not in {action.action_type for action in actions}
+    assert loop.validate(GameAction(A.SELL_HOUSE, {"tile_id": tile.tile_id})) is None
+
+    money_before = loop.game.player_states[debtor].money
+    act(loop, A.SELL_HOUSE, tile_id=tile.tile_id)
+    assert loop.game.property_states[tile.tile_id].houses == HOTEL_LEVEL - 1
+    assert loop.game.player_states[debtor].money == money_before + (tile.hotel_cost or tile.house_cost) // 2
+    assert loop.game.houses_in_bank == 0
+    assert loop.game.house_shortage == HOTEL_LEVEL - 1
+
+    assert loop.turn_phase == GameLoop.RESOLVE_DEBT
+    act(loop, A.END_DEBT_NEGOTIATIONS)
+    assert loop.game.debt_resolution.negotiations_closed
+    for _ in range(HOTEL_LEVEL - 1):
+        act(loop, A.SELL_HOUSE, tile_id=tile.tile_id)
+    assert loop.game.house_shortage == 0
+    assert A.AUCTION_DEBT_PROPERTY in {action.action_type for action in loop.legal_actions()}
 
 
 def test_birthday_debtor_acts_outside_own_turn(make_game):

@@ -28,6 +28,9 @@
   "allowSpectators": true,
 
   "tradeEnabled": true,
+  "tradeMaxCounteroffers": 3,
+  "debtResolutionEnabled": true,
+  "debtNegotiationsPerPlayer": 3,
 
   "bankruptcyToBank": true,
 

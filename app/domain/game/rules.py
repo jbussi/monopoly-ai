@@ -78,6 +78,22 @@ class Rules(ABC):
         """Limite de turnos antes de truncar a partida (None = sem limite)."""
         return None
 
+    @property
+    def trade_enabled(self) -> bool:
+        return False
+
+    @property
+    def trade_max_counteroffers(self) -> int:
+        return 3
+
+    @property
+    def debt_resolution_enabled(self) -> bool:
+        return False
+
+    @property
+    def debt_negotiations_per_player(self) -> int:
+        return 3
+
 
 class ClassicRules(Rules):
     """Implementa as regras tradicionais adotadas nesta versão."""
@@ -126,6 +142,10 @@ class ConfiguredRules(Rules):
     auction_min_bid_value: int = 1
     income_tax_choice_value: bool = False
     max_turns_value: int | None = None
+    trade_enabled_value: bool = True
+    trade_max_counteroffers_value: int = 3
+    debt_resolution_enabled_value: bool = True
+    debt_negotiations_per_player_value: int = 3
 
     @property
     def starting_money(self) -> int:
@@ -176,6 +196,22 @@ class ConfiguredRules(Rules):
     @property
     def income_tax_choice(self) -> bool:
         return self.income_tax_choice_value
+
+    @property
+    def trade_enabled(self) -> bool:
+        return self.trade_enabled_value
+
+    @property
+    def trade_max_counteroffers(self) -> int:
+        return self.trade_max_counteroffers_value
+
+    @property
+    def debt_resolution_enabled(self) -> bool:
+        return self.debt_resolution_enabled_value
+
+    @property
+    def debt_negotiations_per_player(self) -> int:
+        return self.debt_negotiations_per_player_value
 
     @property
     def max_turns(self) -> int | None:

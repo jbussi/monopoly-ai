@@ -35,3 +35,9 @@ class ActionType(StrEnum):
     SELL_HOUSE = "SELL_HOUSE"              # payload: {"tile_id": int}
     MORTGAGE = "MORTGAGE"                  # payload: {"tile_id": int}
     UNMORTGAGE = "UNMORTGAGE"              # payload: {"tile_id": int}
+    PROPOSE_TRADE = "PROPOSE_TRADE"        # payload: structured bilateral trade terms
+    ACCEPT_TRADE = "ACCEPT_TRADE"
+    REJECT_TRADE = "REJECT_TRADE"
+    COUNTER_TRADE = "COUNTER_TRADE"        # payload: structured terms
+    END_DEBT_NEGOTIATIONS = "END_DEBT_NEGOTIATIONS"
+    AUCTION_DEBT_PROPERTY = "AUCTION_DEBT_PROPERTY"  # payload: {"tile_id": int}
