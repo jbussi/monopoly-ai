@@ -69,6 +69,25 @@ def test_greedy_games(config):
             check_invariants(loop, config)
 
 
+def test_twelve_player_random_game_keeps_invariants(config):
+    loop = create_game(
+        [f"P{i}" for i in range(12)], config, seed=1200,
+        max_turns=120, record_events=False,
+    )
+    policies = {
+        player_id: RandomPolicy(1200 + seat)
+        for seat, player_id in enumerate(loop.game.turn_order)
+    }
+
+    while not loop.game.game_over:
+        player_id = loop.current_decision_player_id
+        result = loop.process_action(policies[player_id](loop))
+        assert result["status"] == "SUCCESS", result
+        check_invariants(loop, config)
+
+    assert loop.game.winner_id is not None or loop.game.truncated
+
+
 def test_same_seed_same_game(config):
     def play(seed):
         loop = create_game(["A", "B", "C", "D"], config, seed=seed, max_turns=500)

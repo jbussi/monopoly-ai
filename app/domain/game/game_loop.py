@@ -161,6 +161,12 @@ class GameLoop:
             if player_id == self._auction_highest_bidder:
                 return "O maior lance atual não pode ser retirado."
 
+        elif kind == ActionType.DECLARE_BANKRUPTCY:
+            amount_owed = self.game.amount_owed(player_id)
+            recoverable = state.money + self.game.liquidation_value(player_id)
+            if recoverable >= amount_owed:
+                return "Ainda há recursos suficientes para pagar as dívidas."
+
         elif kind in MANAGEMENT_ACTIONS:
             return self._validate_management(player_id, kind, action.payload)
 
@@ -501,6 +507,10 @@ class GameLoop:
         rent_multiplier: int | None = None,
         reroll_utility: bool = False,
     ) -> None:
+        if self.game.position_of(player_id) == self.rules.go_to_jail_position:
+            self._send_to_jail(player_id, "GO_TO_JAIL_TILE")
+            return
+
         tile = self.game.board.get_tile(self.game.position_of(player_id))
 
         if isinstance(tile, PropertyTile):
@@ -525,9 +535,7 @@ class GameLoop:
             self._charge(player_id, amount, None, "TAX_PAYMENT", tile_id=tile.tile_id)
 
         elif isinstance(tile, SpecialTile):
-            if tile.tile_type == "go_to_jail":
-                self._send_to_jail(player_id, "GO_TO_JAIL_TILE")
-            elif tile.tile_type in self.game.decks:
+            if tile.tile_type in self.game.decks:
                 self._draw_card(player_id, tile.tile_type)
 
     def _draw_card(self, player_id: UUID, deck_name: str) -> None:

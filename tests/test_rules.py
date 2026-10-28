@@ -1,3 +1,6 @@
+import pytest
+
+from app.application.game_setup import create_game
 from app.domain.game.actions import ActionType as A
 from app.domain.game.actions import GameAction
 from app.domain.game.game_loop import GameLoop
@@ -26,6 +29,17 @@ def test_board_built_from_config(make_game):
     assert board.size == 40
     assert len(board.property_tiles) == 28
     assert len({tile.group for tile in board.property_tiles}) == 10
+
+
+def test_game_player_count_is_between_two_and_twelve(config):
+    with pytest.raises(ValueError, match="pelo menos 2 jogadores"):
+        create_game(["P0"], config)
+
+    loop = create_game([f"P{i}" for i in range(12)], config, seed=0)
+    assert len(loop.game.turn_order) == 12
+
+    with pytest.raises(ValueError, match="no máximo 12 jogadores"):
+        create_game([f"P{i}" for i in range(13)], config)
 
 
 def test_buy_property(make_game):
@@ -191,7 +205,11 @@ def test_debt_resolution_by_mortgage(make_game):
     act(loop, A.ROLL_DICE)
     assert loop.turn_phase == GameLoop.RESOLVE_DEBT
     kinds = {a.action_type for a in loop.legal_actions()}
-    assert kinds == {A.MORTGAGE, A.DECLARE_BANKRUPTCY}
+    assert kinds == {A.MORTGAGE}
+    result = loop.process_action(GameAction(A.DECLARE_BANKRUPTCY))
+    assert result["status"] == "REJECTED"
+    assert "recursos suficientes" in result["reason"]
+    assert not loop.game.player_states[ids(loop)[0]].is_bankrupt
     act(loop, A.MORTGAGE, tile_id=ORIENTAL)
     assert loop.turn_phase == GameLoop.AFTER_ROLL
     assert money(loop, 0) == 2 + 50 - 4 and money(loop, 1) == 1504

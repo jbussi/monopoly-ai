@@ -223,7 +223,62 @@ def _validate_board(board: tuple[BoardSpace, ...]) -> None:
         )
 
 
-def _parse_cards(raw: Any, deck_name: str) -> tuple[CardDefinition, ...]:
+def _validate_card_data(
+    card_data: dict[str, Any],
+    action: str,
+    card_id: str,
+    board: tuple[BoardSpace, ...],
+) -> None:
+    context = f"Dados da carta {card_id!r}"
+
+    def integer(key: str, *, minimum: int = 0) -> int:
+        return _require_int(card_data, key, context, minimum=minimum)
+
+    def optional_boolean(key: str) -> None:
+        if key in card_data and not isinstance(card_data[key], bool):
+            raise ValueError(f"{context}: '{key}' deve ser booleano.")
+
+    if action == CardAction.ADVANCE_TO:
+        position = integer("position")
+        if position >= len(board):
+            raise ValueError(
+                f"{context}: 'position' deve estar entre 0 e {len(board) - 1}."
+            )
+        optional_boolean("collectGoSalary")
+    elif action == CardAction.ADVANCE_TO_NEAREST:
+        target_type = card_data.get("type")
+        if target_type not in ("railroad", "utility"):
+            raise ValueError(
+                f"{context}: 'type' deve ser 'railroad' ou 'utility'."
+            )
+        if not any(space.type == target_type for space in board):
+            raise ValueError(
+                f"{context}: o tabuleiro não possui casas do tipo {target_type!r}."
+            )
+        if "rentMultiplier" in card_data:
+            integer("rentMultiplier", minimum=1)
+        optional_boolean("collectGoSalary")
+    elif action in (
+        CardAction.COLLECT,
+        CardAction.BANK_ERROR,
+        CardAction.PAY,
+        CardAction.PAY_EACH_PLAYER,
+        CardAction.COLLECT_FROM_EACH_PLAYER,
+        CardAction.BIRTHDAY,
+    ):
+        integer("amount")
+    elif action == CardAction.GO_BACK:
+        integer("spaces", minimum=1)
+    elif action == CardAction.REPAIRS:
+        integer("houseCost")
+        integer("hotelCost")
+
+
+def _parse_cards(
+    raw: Any,
+    deck_name: str,
+    board: tuple[BoardSpace, ...],
+) -> tuple[CardDefinition, ...]:
     if not isinstance(raw, list):
         raise ValueError(f"O baralho {deck_name!r} deve ser uma lista.")
 
@@ -244,6 +299,7 @@ def _parse_cards(raw: Any, deck_name: str) -> tuple[CardDefinition, ...]:
                 f"na carta '{card_id}'."
             )
         card_data = _require_object(data.get("data"), f"Dados de {card_id!r}")
+        _validate_card_data(card_data, action, card_id, board)
 
         cards.append(
             CardDefinition(
@@ -325,13 +381,15 @@ def _parse_settings(raw: dict[str, Any]) -> GameSettings:
 
 
 def _validate_settings(settings: GameSettings, board_size: int) -> None:
-    if settings.min_players_to_start < 1:
-        raise ValueError("É necessário permitir ao menos um jogador.")
+    if settings.min_players_to_start < 2:
+        raise ValueError("'minPlayersToStart' deve ser pelo menos 2.")
 
     if settings.max_players < settings.min_players_to_start:
         raise ValueError(
             "'maxPlayers' não pode ser menor que 'minPlayersToStart'."
         )
+    if settings.max_players > 12:
+        raise ValueError("'maxPlayers' não pode ser maior que 12.")
 
     if settings.jail_max_turns < 1:
         raise ValueError("'jailMaxTurns' deve ser positivo.")
@@ -374,10 +432,10 @@ def load_game_config(
     _validate_board(board)
 
     chance_cards = _parse_cards(
-        raw_cards.get("chance"), "chance"
+        raw_cards.get("chance"), "chance", board
     )
     community_chest_cards = _parse_cards(
-        raw_cards.get("communityChest"), "communityChest"
+        raw_cards.get("communityChest"), "communityChest", board
     )
 
     settings = _parse_settings(

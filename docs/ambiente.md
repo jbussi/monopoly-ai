@@ -4,6 +4,9 @@ Este documento é o **contrato** entre a engine (`app/domain/game`) e o código 
 Dentro da v1, tudo o que está aqui é estável. Mudar um tamanho ou uma ordem invalida
 modelos treinados e exige uma v2 (ver [Versionamento](#versionamento)).
 
+O motor aceita partidas com 2 a 12 jogadores. Os adaptadores RL desta versão usam uma
+observação com quatro assentos e, portanto, aceitam partidas com 2 a 4 jogadores.
+
 ## Camadas
 
 ```
@@ -12,17 +15,19 @@ app/infraestructure/game_config  lê e valida os JSONs        -> GameConfig
 app/application/game_setup       monta a partida              -> create_game(...) -> GameLoop
 app/domain/game                  regras (GameLoop, GameState): ações em texto, sem IA
 app/envs                         adaptadores: espaço discreto, observação, PettingZoo, Gymnasium, texto
-agents/                          treino e modelos (área livre)
+agents/                          reservado a agentes treináveis da v2
 ```
 
-A engine não depende de numpy, gymnasium nem pettingzoo. A API dela é
+A engine de domínio não depende de Gymnasium nem PettingZoo. A API dela é
 `GameLoop.process_action(GameAction)`, `legal_actions()` e `validate(action)`, as mesmas
 que uma API web ou um humano usariam. As duas primeiras usam a mesma validação, então a
-máscara de ações nunca diverge do que a engine aceita (há teste para isso).
+máscara de ações corresponde às ações aceitas (há teste para isso).
 
 ## Regras
 
-Regras clássicas americanas, lidas do `settings.json`:
+Regras clássicas americanas. `settings.json` é a fonte oficial para valores e flags de
+regras; `board.json` define a estrutura do tabuleiro, os grupos e as tabelas de aluguel.
+Quando um valor aparece nos dois arquivos, o motor usa `settings.json`.
 
 - compra de imóvel e **leilão** do imóvel recusado (`auctionEnabled`);
 - aluguel com valor de monopólio do `board.json`, casas e hotel;
@@ -63,13 +68,19 @@ num leilão é quem tem a vez de dar lance; numa dívida, é o devedor (ex.: car
 | `AWAITING_PROPERTY_DECISION` | `BUY_PROPERTY` (se tiver dinheiro), `DECLINE_PROPERTY`; gerenciamento |
 | `AUCTION` | `AUCTION_BID {amount}`, `AUCTION_WITHDRAW` |
 | `AFTER_ROLL` | `END_TURN`; gerenciamento |
-| `RESOLVE_DEBT` | `SELL_HOUSE`, `MORTGAGE`, `DECLARE_BANKRUPTCY` |
+| `RESOLVE_DEBT` | `SELL_HOUSE`, `MORTGAGE`; a falência pode ocorrer automaticamente quando a liquidação estimada não cobre a dívida |
 | `GAME_OVER` | nenhuma |
 
 "Gerenciamento" = `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE` e `UNMORTGAGE`, todas com `{tile_id}`.
-Um turno tem várias decisões do mesmo agente. **Sempre há pelo menos uma ação legal**
-enquanto a partida não acaba. Uma dívida é paga automaticamente assim que o devedor tem
-o dinheiro; se nem vendendo tudo ele consegue pagar, a falência é imediata.
+Um turno tem várias decisões do mesmo agente. Uma dívida é paga automaticamente assim que
+o devedor tem dinheiro suficiente; caso contrário, pode vender construções ou hipotecar
+imóveis. Se o valor estimado de liquidação não cobrir a dívida, a falência é imediata.
+
+**Limitação conhecida da v1:** a estimativa de liquidação conta o valor de hotéis sem
+considerar se há quatro casas disponíveis para vendê-los. Como a venda de hotel é bloqueada
+quando o banco não tem quatro casas, certos estados de dívida podem ficar sem ação legal.
+Esse caso foi identificado na revisão e deve ser considerado ao avaliar a release; a
+revisão das regras de dívida está planejada para a v2.
 
 ## Espaço de ações: `Discrete(124)`
 
@@ -144,7 +155,7 @@ Uma política é qualquer callable `policy(loop) -> GameAction`. `RandomPolicy` 
 - `create_game(..., seed=s)` controla os dados, os baralhos e os IDs dos jogadores. A mesma seed com as mesmas ações reproduz a mesma partida.
 - `env.reset(seed=s)` também semeia os oponentes que têm `reset(seed)`.
 - `record_events=True` grava a telemetria em `game.history_logs`. Os ambientes desligam isso por desempenho.
-- Velocidade atual: cerca de 8 a 10 mil ações por segundo em um núcleo. O gargalo é o `legal_actions()`.
+- Não há benchmark de desempenho automatizado mantido como parte do contrato v1.
 
 ## Versionamento
 

@@ -22,7 +22,7 @@
 
   "freeParkingJackpot": false,
 
-  "maxPlayers": 8,
+  "maxPlayers": 12,
   "minPlayersToStart": 2,
 
   "allowSpectators": true,
