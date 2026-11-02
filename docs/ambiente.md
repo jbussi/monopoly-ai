@@ -221,6 +221,86 @@ pendente, ledger ordenado de dívidas, progresso da insolvência, oferta pendent
 incluindo `house_shortage`. Slots de jogadores são relativos ao observador: slot 0 é o
 próprio jogador. As cartas de prisão, propriedades oferecidas e participantes de leilão
 também são visíveis; a ordem oculta dos baralhos continua privada.
+Quando o agente atual está preso, `jail_forecast` oferece previsões Monte Carlo para
+1, 3 e 5 turnos próprios, comparando tentar duplas, pagar a multa e usar uma carta.
+O contrato detalhado e as hipóteses desta primeira versão estão em
+[`contrato-observacao-rl-v2.md`](contrato-observacao-rl-v2.md).
+
+O campo `stationary_economics` acrescenta tráfego estacionário por propriedade e cenários
+comparáveis de investimento. `property_arrivals_per_roll` é a taxa de chegada por
+lançamento; `utility_dice_total_per_roll` preserva o valor esperado dos dados usados no
+aluguel de utilidades e `railroad_rent_multiplier_per_roll` inclui o efeito das cartas de
+ferrovia; `expected_rolls_per_turn` converte taxas por lançamento em renda
+estimada por turno. As linhas `portfolio_membership` e `portfolio_groups` identificam cada
+combinação de imóveis do grupo; `portfolio_development` marca o nível uniforme de
+construção (0 = sem construções, 1–4 = casas, 5 = hotel). `portfolio_investment` e
+`portfolio_income_per_turn` estão normalizados pelo fator monetário da observação;
+`portfolio_gross_yield_per_turn` é a renda bruta estimada por turno dividida pelo
+investimento. Renda e rendimento são escalados pelo número atual de adversários ativos.
+
+Essas estimativas são estruturais e de longo prazo, não uma previsão da próxima rodada.
+O modelo é por lançamento, tenta duplas na prisão e usa cartas uniformes com reposição;
+ignora mudanças futuras de posse, hipotecas, comportamento dos adversários e custos
+operacionais. O ROI em um horizonte explícito pode ser calculado separadamente a partir da
+renda por turno; ele não presume valor residual de revenda. Para uma compra ou lance, compare
+o cenário de posse atual do grupo com o cenário que inclui o imóvel candidato, usando o preço
+de compra ou o valor do lance como investimento marginal.
+
+Em `property_decision_valuation`, `active` indica que o observador está decidindo sobre um
+imóvel livre, diretamente ou em leilão. `candidate_property` e `owned_group_properties`
+identificam o imóvel e a posse atual do observador naquele grupo. A avaliação compara a renda
+estacionária bruta do grupo antes e depois da aquisição, ajustada pelos adversários ativos e
+por hipotecas existentes; também informa se a compra completa o grupo. Os valores de renda e
+`reference_price` são normalizados. `marginal_yield_at_reference_price` é a renda marginal
+bruta por turno dividida pelo preço de tabela; `payback_turns` é preço dividido pela renda
+marginal por turno (com `payback_available` indicando se essa razão é definida). No leilão,
+`next_auction_bid` fornece o menor lance legal atual; o agente pode comparar o retorno
+marginal com qualquer lance que esteja considerando. O bloco é somente informativo e não
+prescreve uma ação.
+
+`cash_flow_forecast` só fica ativo quando o observador é o jogador que decide comprar um
+imóvel. Compara `buy` e `decline` em três horizontes (1, 3 e 5 turnos pessoais), usando 32
+simulações pareadas e os mesmos fluxos aleatórios em cada par. Os arrays de cenário usam
+ordem `[buy, decline]`; os últimos eixos dos campos de distribuição usam
+`[média, p05, p25, p50, p75, p95]`. `cash_change`, `cash_in`, `cash_out`, `ending_cash` e
+`minimum_cash` são normalizados pelo fator monetário. As probabilidades de dívida e falência
+permanecem entre 0 e 1. Horizonte 1 inclui o restante da vez atual até a próxima vez do
+jogador; horizontes 3 e 5 avançam a partir daí.
+
+As trajetórias usam cópias da partida e o motor real para dados, cartas, aluguéis, impostos e
+liquidação. Para decisões futuras, todos os jogadores usam `GreedyPolicy`; no cenário de
+recusa, o agente focal sai do leilão daquele imóvel. A ordem oculta das cartas é substituída
+por embaralhamentos determinísticos dos conteúdos conhecidos, pareados entre os cenários.
+Assim, a distribuição é condicional ao estado atual, mas depende dessa política de referência
+e não representa uma previsão sem hipótese sobre o comportamento futuro.
+
+`jail_decision_forecast` fica ativo quando o observador está preso e deve escolher entre
+`ROLL_DICE`, `PAY_JAIL_FINE` e `USE_JAIL_CARD`, nessa ordem. Para cada opção, simula 1, 3 e
+5 turnos pessoais usando o motor e a `GreedyPolicy` nas decisões futuras; informa distribuições
+de caixa, probabilidade de continuar preso, dívida e falência, além da quantidade esperada de
+cartas de prisão restante. A probabilidade de prisão é o estado no fim de cada horizonte e pode
+incluir uma nova ida à cadeia depois da saída inicial.
+
+`property_available` identifica imóveis sem dono no estado atual. Para cada um, os vetores
+`property_marginal_income_per_turn` e `property_marginal_yield` mostram sua avaliação
+estacionária para o observador, usando a posse atual do grupo e o preço de tabela. O tensor
+`unowned_property_probability` estima, por opção e horizonte, a probabilidade de o jogador
+encontrar cada imóvel ainda sem dono ao menos uma vez. `weighted_property_opportunity` pondera
+essa probabilidade pela renda marginal estacionária do imóvel. É um indicador de oportunidade
+de compra, não caixa realizado: a chance de poder pagar e os demais riscos de caixa devem ser
+lidos junto com as distribuições de fluxo correspondentes.
+
+Para gestão dos imóveis, `management_decision_valuation` lista por tipo de ação e imóvel
+legal o caixa recebido ou gasto imediatamente e a renda estacionária do grupo antes e depois
+da alteração. A ordem dos tipos é `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE`, `UNMORTGAGE`.
+`marginal_yield_per_turn` é a variação de renda bruta por turno dividida pelo valor absoluto
+do caixa movimentado. `management_cash_forecast` fornece, para cada opção legal,
+distribuições pareadas entre executar a ação agora e adiá-la uma vez, nos horizontes 1, 3 e
+5. Ao adiar, usa uma ação de continuação compatível com a fase (rolar, encerrar a vez ou
+encerrar negociações de dívida); depois disso, todos seguem `GreedyPolicy`. As amostras usam
+a mesma ordem de estatísticas e escala monetária de `cash_flow_forecast`, com 8 amostras por
+comparação. As projeções deixam explícita a hipótese de continuação e não recomendam
+automaticamente uma ação.
 
 A ação v2 é um `Dict` com os seguintes campos:
 
@@ -248,6 +328,15 @@ uma política autoregressiva pode pedir máscaras sucessivas passando `action_ty
 intervalo de lances e valores de dinheiro sem enumerar cada dólar. A validação final é
 sempre feita por `GameLoop.validate()` ao processar a ação, então agentes devem respeitar
 as máscaras e descartar ações rejeitadas.
+
+`trade_requirements` na máscara informa as condições conjuntas da proposta: índice 0
+indica que a proposta/contraproposta precisa transferir ao menos um item; índice 1 indica
+que, durante a insolvência, ela precisa aumentar estritamente o dinheiro líquido do
+devedor. Máscaras de propriedades e cartas indicam quais itens podem ser selecionados,
+mas não representam cardinalidade nem combinações entre vários vetores. O agente deve
+honrar `trade_requirements`; o motor continua validando os termos completos. A conversão
+da ação estruturada também exige que o dicionário corresponda ao espaço declarado, sem
+coerção de escalares fracionários ou booleanos para inteiros.
 
 Gymnasium v2 retorna o estado e as máscaras dentro da observação; `env.action_masks()`
 também pode recalcular a máscara condicional para uma política autoregressiva. PettingZoo

@@ -6,11 +6,12 @@ from uuid import UUID
 from .board import Board, PropertyKind, PropertyTile
 from .card_actions import CardLike
 from .cards import CardDeck
+from .auction import AuctionDecisionRecord, AuctionResultRecord, AuctionSessionRecord
 from .dice import DiceMechanism, DiceRoll
 from .pieces import Piece
 from .player import Player
 from .rules import Rules
-from .trade import TradeNegotiation, TradeOffer
+from .trade import TradeContextRecord, TradeDecisionRecord, TradeNegotiation, TradeOffer
 
 HOTEL_LEVEL = 5
 
@@ -135,6 +136,12 @@ class GameState:
         self.house_shortage: int = 0
         self.pending_trade: TradeNegotiation | None = None
         self.trade_history: list[TradeOffer] = []
+        self.trade_decision_history: list[TradeDecisionRecord] = []
+        self.trade_context_history: list[TradeContextRecord] = []
+        self.auction_history: list[AuctionSessionRecord] = []
+        self.auction_decision_history: list[AuctionDecisionRecord] = []
+        self.auction_result_history: list[AuctionResultRecord] = []
+        self.next_auction_id: int = 1
         self.next_trade_id: int = 1
 
         self.game_over: bool = False

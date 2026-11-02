@@ -3,6 +3,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from .auction import (
+    AuctionDecisionRecord,
+    AuctionParticipantSnapshot,
+    AuctionPropertySnapshot,
+    AuctionResultRecord,
+    AuctionSessionRecord,
+)
 from .actions import ActionType, GameAction
 from .board import PropertyKind, PropertyTile, SpecialTile, TaxTile
 from .card_actions import (
@@ -12,7 +19,14 @@ from .card_actions import (
     CardLike,
 )
 from .game_state import DebtResolutionState, HOTEL_LEVEL, Debt, GameState
-from .trade import TradeOffer, payload_to_offer
+from .trade import (
+    TradeContextRecord,
+    TradeDecisionRecord,
+    TradeOffer,
+    TradePlayerContext,
+    TradePropertyContext,
+    payload_to_offer,
+)
 
 # Incrementos sobre o maior lance que `legal_actions` oferece num leilão.
 # `process_action` aceita qualquer lance inteiro válido; a lista existe para
@@ -95,6 +109,7 @@ class GameLoop:
         self._auction_for_debt = False
         self._auction_for_bankruptcy = False
         self._auction_seller_id: UUID | None = None
+        self._active_auction_id: int | None = None
         self._bankruptcy_auction_queue: list[int] = []
         self._bankruptcy_auction_player_id: UUID | None = None
         self._mortgage_transfer_queue: list[tuple[UUID, int]] = []
@@ -137,6 +152,10 @@ class GameLoop:
     @property
     def auction_highest_bidder(self) -> UUID | None:
         return self._auction_highest_bidder
+
+    @property
+    def current_auction_id(self) -> int | None:
+        return self._active_auction_id
 
     def auction_bid_amount(self, increment: int) -> int:
         """Valor de um lance `increment` acima do maior lance atual."""
@@ -725,6 +744,7 @@ class GameLoop:
         self.game.next_trade_id += 1
         self.game.pending_trade = self._new_negotiation(offer, is_debt_trade)
         self.game.trade_history.append(offer)
+        self._record_trade_context(offer, is_debt_trade)
         self.game.log_event("TRADE_PROPOSED", self._trade_event_data(offer))
         return self._success(event="TRADE_PROPOSED", negotiation_id=offer.negotiation_id)
 
@@ -732,6 +752,7 @@ class GameLoop:
         negotiation = self.game.pending_trade
         offer = negotiation.current_offer
         self._apply_trade(offer)
+        self._record_trade_decision(offer, player_id, "ACCEPTED")
         self.game.log_event("TRADE_ACCEPTED", self._trade_event_data(offer))
         self.game.pending_trade = None
         self._trade_window_open = False
@@ -789,6 +810,7 @@ class GameLoop:
 
     def _handle_reject_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         offer = self.game.pending_trade.current_offer
+        self._record_trade_decision(offer, player_id, "REJECTED")
         self.game.log_event("TRADE_REJECTED", self._trade_event_data(offer))
         self.game.pending_trade = None
         self._trade_window_open = False
@@ -797,6 +819,7 @@ class GameLoop:
     def _handle_counter_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         negotiation = self.game.pending_trade
         previous = negotiation.current_offer
+        self._record_trade_decision(previous, player_id, "COUNTERED")
         offer = payload_to_offer(
             action.payload,
             previous.negotiation_id,
@@ -807,6 +830,7 @@ class GameLoop:
         negotiation.current_offer = offer
         negotiation.counteroffers_made += 1
         self.game.trade_history.append(offer)
+        self._record_trade_context(offer, negotiation.is_debt_trade)
         self.game.log_event("TRADE_COUNTEROFFERED", self._trade_event_data(offer))
         return self._success(
             event="TRADE_COUNTEROFFERED",
@@ -837,6 +861,61 @@ class GameLoop:
     def _new_negotiation(offer: TradeOffer, is_debt_trade: bool = False):
         from .trade import TradeNegotiation
         return TradeNegotiation(current_offer=offer, is_debt_trade=is_debt_trade)
+
+    def _record_trade_decision(
+        self,
+        offer: TradeOffer,
+        responder_id: UUID,
+        response: str,
+    ) -> None:
+        self.game.trade_decision_history.append(
+            TradeDecisionRecord(
+                negotiation_id=offer.negotiation_id,
+                counteroffer_number=offer.counteroffer_number,
+                responder_id=responder_id,
+                response=response,
+                turn=self.game.turn_counter,
+            )
+        )
+
+    def _record_trade_context(self, offer: TradeOffer, is_debt_trade: bool) -> None:
+        game = self.game
+        players = tuple(
+            TradePlayerContext(
+                player_id=player_id,
+                money=game.player_states[player_id].money,
+                position=game.position_of(player_id),
+                is_in_jail=game.player_states[player_id].is_in_jail,
+                is_bankrupt=game.player_states[player_id].is_bankrupt,
+                net_worth=game.net_worth(player_id),
+                amount_owed=game.amount_owed(player_id),
+                jail_cards=tuple(
+                    f"{deck_name}:{card.id}"
+                    for deck_name, card in game.player_states[player_id].jail_cards
+                ),
+            )
+            for player_id in game.turn_order
+        )
+        properties = tuple(
+            TradePropertyContext(
+                tile_id=tile.tile_id,
+                owner_id=game.property_states[tile.tile_id].owner_id,
+                houses=game.property_states[tile.tile_id].houses,
+                is_mortgaged=game.property_states[tile.tile_id].is_mortgaged,
+            )
+            for tile in game.board.property_tiles
+        )
+        game.trade_context_history.append(
+            TradeContextRecord(
+                negotiation_id=offer.negotiation_id,
+                counteroffer_number=offer.counteroffer_number,
+                turn=game.turn_counter,
+                phase=self.turn_phase,
+                is_debt_trade=is_debt_trade,
+                players=players,
+                properties=properties,
+            )
+        )
 
     @staticmethod
     def _trade_event_data(offer: TradeOffer) -> dict[str, Any]:
@@ -993,6 +1072,7 @@ class GameLoop:
         self._auction_highest_bid = 0
         self._auction_highest_bidder = None
         self.turn_phase = self.AUCTION
+        self._record_auction_start("BANK")
 
     def _start_debt_auction(self, tile_id: int, seller_id: UUID) -> None:
         self._auction_for_debt = True
@@ -1011,6 +1091,13 @@ class GameLoop:
         self._auction_highest_bid = 0
         self._auction_highest_bidder = None
         self.turn_phase = self.AUCTION
+        self._record_auction_start("DEBT")
+        if not self._auction_pending:
+            # The debtor cannot bid on their own property. If no other player
+            # remains active, resolve this as an auction with no bids now;
+            # otherwise AUCTION would have no actor and could expose a
+            # bankrupt player as current_decision_player_id.
+            self._finish_auction()
 
     def _start_bankruptcy_auction(self, tile_id: int, bankrupt_player_id: UUID) -> None:
         """Auction a bank-repossessed property among all remaining players."""
@@ -1031,9 +1118,15 @@ class GameLoop:
         self._auction_highest_bid = 0
         self._auction_highest_bidder = None
         self.turn_phase = self.AUCTION
+        self._record_auction_start("BANKRUPTCY")
+        if not self._auction_pending:
+            # Repossessed assets still need their no-bid outcome applied so
+            # bankruptcy settlement can finish even when there are no bidders.
+            self._finish_auction()
 
     def _handle_auction_bid(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         amount = action.payload["amount"]
+        self._record_auction_decision(player_id, "BID", amount)
         self._auction_highest_bid = amount
         self._auction_highest_bidder = player_id
         self.game.log_event(
@@ -1049,6 +1142,7 @@ class GameLoop:
         return self._advance_auction()
 
     def _handle_auction_withdraw(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        self._record_auction_decision(player_id, "WITHDRAW", None)
         self._auction_pending.remove(player_id)
         self._auction_active.remove(player_id)
         self.game.log_event(
@@ -1074,6 +1168,21 @@ class GameLoop:
         debt_auction = self._auction_for_debt
         bankruptcy_auction = self._auction_for_bankruptcy
         seller_id = self._auction_seller_id
+        auction_type = "DEBT" if debt_auction else "BANKRUPTCY" if bankruptcy_auction else "BANK"
+        if self._active_auction_id is None:
+            raise RuntimeError("Leilão sem identificador de sessão ativo.")
+        self.game.auction_result_history.append(
+            AuctionResultRecord(
+                auction_id=self._active_auction_id,
+                tile_id=tile_id,
+                turn=self.game.turn_counter,
+                winner_id=winner_id,
+                winning_bid=amount,
+                seller_id=seller_id,
+                auction_type=auction_type,
+            )
+        )
+        self._active_auction_id = None
         mortgage_transfer: list[tuple[UUID, int]] = []
         if winner_id is not None:
             # O lance nunca excede o saldo, e o saldo não muda durante o leilão
@@ -1158,6 +1267,65 @@ class GameLoop:
             self._bankruptcy_auction_player_id = None
             return self._success(event=event, tile_id=tile_id)
         return self._finish_property_resolution()
+
+    def _record_auction_start(self, auction_type: str) -> None:
+        game = self.game
+        auction_id = game.next_auction_id
+        game.next_auction_id += 1
+        self._active_auction_id = auction_id
+        game.auction_history.append(
+            AuctionSessionRecord(
+                auction_id=auction_id,
+                tile_id=self._auction_tile_id,
+                turn=game.turn_counter,
+                auction_type=auction_type,
+                seller_id=self._auction_seller_id,
+                opening_bid=self.rules.auction_min_bid,
+                participants=tuple(self._auction_active),
+                player_snapshots=tuple(
+                    AuctionParticipantSnapshot(
+                        player_id=player_id,
+                        money=game.player_states[player_id].money,
+                        net_worth=game.net_worth(player_id),
+                        position=game.position_of(player_id),
+                        is_in_jail=game.player_states[player_id].is_in_jail,
+                        amount_owed=game.amount_owed(player_id),
+                    )
+                    for player_id in game.turn_order
+                ),
+                property_snapshots=tuple(
+                    AuctionPropertySnapshot(
+                        tile_id=tile.tile_id,
+                        owner_id=game.property_states[tile.tile_id].owner_id,
+                        houses=game.property_states[tile.tile_id].houses,
+                        is_mortgaged=game.property_states[tile.tile_id].is_mortgaged,
+                    )
+                    for tile in game.board.property_tiles
+                ),
+            )
+        )
+
+    def _record_auction_decision(
+        self,
+        player_id: UUID,
+        action: str,
+        bid_amount: int | None,
+    ) -> None:
+        if self._active_auction_id is None:
+            raise RuntimeError("Decisão de leilão sem sessão ativa.")
+        self.game.auction_decision_history.append(
+            AuctionDecisionRecord(
+                auction_id=self._active_auction_id,
+                turn=self.game.turn_counter,
+                player_id=player_id,
+                action=action,
+                bid_amount=bid_amount,
+                highest_bid_before=self._auction_highest_bid,
+                leader_before=self._auction_highest_bidder,
+                money_before=self.game.player_states[player_id].money,
+                remaining_bidders=max(0, len(self._auction_active) - 1),
+            )
+        )
 
     # =============================================================== movimento
 

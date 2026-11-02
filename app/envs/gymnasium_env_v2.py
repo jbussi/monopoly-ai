@@ -10,6 +10,12 @@ import numpy as np
 from gymnasium import spaces
 
 from app.application.game_setup import create_game, load_selected_game
+from app.domain.analytics.decision_context import DecisionContext, evaluate_candidate
+from app.domain.analytics.decision_features import (
+    DecisionFeaturesEncoder,
+    EncodedDecisionContext,
+)
+from app.domain.game.actions import GameAction
 from app.envs.action_space_v2 import StructuredActionSpace
 from app.envs.baselines import Policy, RandomPolicy
 from app.envs.observation_v2 import ObservationEncoderV2
@@ -35,6 +41,8 @@ class MonopolyGymEnvV2(gym.Env):
         render_mode: str | None = None,
         on_illegal: str = "raise",
         illegal_reward: float = -1.0,
+        decision_horizons: Sequence[int] = (1, 3, 5),
+        max_decision_alternatives: int = 128,
     ) -> None:
         if not 2 <= num_players <= max_players <= 12:
             raise ValueError("Precisa de 2 <= num_players <= max_players <= 12.")
@@ -57,6 +65,8 @@ class MonopolyGymEnvV2(gym.Env):
         self.render_mode = render_mode
         self.on_illegal = on_illegal
         self.illegal_reward = illegal_reward
+        self.decision_horizons = tuple(decision_horizons)
+        self.max_decision_alternatives = max_decision_alternatives
         self._setup_episode(seed=None)
         self.action_space = self.action_map.action_space
         self.observation_space = spaces.Dict({
@@ -79,8 +89,16 @@ class MonopolyGymEnvV2(gym.Env):
             self.loop, self.max_players, loop_provider=lambda: self.loop
         )
         self.encoder = ObservationEncoderV2(
-            self.loop, self.max_players, self.max_turns, self.action_map.jail_card_ids
+            self.loop, self.max_players, self.max_turns, self.action_map.jail_card_ids,
+            config=self.config,
         )
+        self.decision_features_encoder = DecisionFeaturesEncoder(
+            self.loop,
+            max_players=self.max_players,
+            max_alternatives=self.max_decision_alternatives,
+            horizons=self.decision_horizons,
+        )
+        self.decision_features_space = self.decision_features_encoder.observation_space
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -138,6 +156,52 @@ class MonopolyGymEnvV2(gym.Env):
             target_player_index=target_player_index,
             money_offered=money_offered,
             money_requested=money_requested,
+        )
+
+    def evaluate_candidate(
+        self,
+        action: dict[str, Any] | GameAction,
+        *,
+        baseline_action: dict[str, Any] | GameAction | None = None,
+        **options: Any,
+    ) -> DecisionContext:
+        """Fetch conditional decision features for the learner's legal action."""
+        if self.loop.current_decision_player_id != self.learner_id:
+            raise ValueError("Só é possível avaliar ações quando o agente aprendiz decide.")
+        candidate = (
+            action if isinstance(action, GameAction)
+            else self.action_map.to_game_action(action, self.loop)
+        )
+        baseline = (
+            baseline_action if isinstance(baseline_action, GameAction)
+            else self.action_map.to_game_action(baseline_action, self.loop)
+            if baseline_action is not None else None
+        )
+        return evaluate_candidate(
+            self.loop,
+            self.config,
+            self.learner_id,
+            candidate,
+            baseline_action=baseline,
+            **options,
+        )
+
+    def evaluate_candidate_features(
+        self,
+        action: dict[str, Any] | GameAction,
+        *,
+        baseline_action: dict[str, Any] | GameAction | None = None,
+        **options: Any,
+    ) -> EncodedDecisionContext:
+        """Evaluate a candidate and return both details and fixed-shape features."""
+        context = self.evaluate_candidate(
+            action,
+            baseline_action=baseline_action,
+            **options,
+        )
+        return EncodedDecisionContext(
+            context=context,
+            features=self.decision_features_encoder.encode(context),
         )
 
     def render(self) -> str | None:

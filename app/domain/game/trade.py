@@ -27,6 +27,50 @@ class TradeNegotiation:
     is_debt_trade: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class TradeDecisionRecord:
+    """Public response to one specific version of a trade offer."""
+
+    negotiation_id: int
+    counteroffer_number: int
+    responder_id: UUID
+    response: str  # ACCEPTED, REJECTED, or COUNTERED
+    turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class TradePlayerContext:
+    player_id: UUID
+    money: int
+    position: int
+    is_in_jail: bool
+    is_bankrupt: bool
+    net_worth: int
+    amount_owed: int
+    jail_cards: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TradePropertyContext:
+    tile_id: int
+    owner_id: UUID | None
+    houses: int
+    is_mortgaged: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TradeContextRecord:
+    """Public game facts captured when one offer version was submitted."""
+
+    negotiation_id: int
+    counteroffer_number: int
+    turn: int
+    phase: str
+    is_debt_trade: bool
+    players: tuple[TradePlayerContext, ...]
+    properties: tuple[TradePropertyContext, ...]
+
+
 def payload_to_offer(
     payload: dict,
     negotiation_id: int,

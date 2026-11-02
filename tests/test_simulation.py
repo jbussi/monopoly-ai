@@ -58,7 +58,11 @@ def test_random_games_keep_invariants(config, num_players):
             result = loop.process_action(rng.choice(loop.legal_actions()))
             assert result["status"] == "SUCCESS", result
             check_invariants(loop, config)
-        assert loop.game.winner_id is not None or loop.game.truncated
+        assert (
+            loop.game.winner_id is not None
+            or loop.game.truncated
+            or not loop.game.active_player_ids
+        )
 
 
 def test_greedy_games(config):

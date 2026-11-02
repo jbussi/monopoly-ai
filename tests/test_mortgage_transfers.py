@@ -1,6 +1,6 @@
 from app.domain.game.actions import ActionType as A, GameAction
 from app.domain.game.game_loop import GameLoop
-from app.domain.game.game_state import Debt
+from app.domain.game.game_state import Debt, DebtResolutionState
 
 
 def act(loop, kind, **payload):
@@ -110,6 +110,55 @@ def test_bankruptcy_to_bank_auctions_repossessed_mortgaged_property(make_game):
     assert loop.game.player_states[bidder].money == 1499
     assert loop.game.game_over
     assert loop.game.winner_id == bidder
+
+
+def test_debt_auction_without_any_other_active_player_finishes_immediately(make_game):
+    loop = make_game()
+    debtor, eliminated = loop.game.turn_order
+    tile = loop.game.board.property_tiles[0]
+    loop.game.player_states[eliminated].is_bankrupt = True
+    loop.game.player_states[debtor].money = 0
+    loop.game.property_states[tile.tile_id].owner_id = debtor
+    loop.game.debts.append(Debt(debtor, None, 100))
+    loop.game.debt_resolution = DebtResolutionState(
+        debtor_id=debtor,
+        negotiations_closed=True,
+    )
+    loop.turn_phase = GameLoop.RESOLVE_DEBT
+
+    act(loop, A.AUCTION_DEBT_PROPERTY, tile_id=tile.tile_id)
+
+    assert loop.turn_phase == GameLoop.RESOLVE_DEBT
+    assert loop.current_decision_player_id == debtor
+    assert not loop.game.player_states[loop.current_decision_player_id].is_bankrupt
+    assert tile.tile_id in loop.game.debt_resolution.auctioned_property_ids
+    assert loop.game.property_states[tile.tile_id].owner_id == debtor
+    assert loop.game.debts
+
+
+def test_last_players_repossessed_property_auction_finishes_without_bidders(make_game):
+    loop = make_game()
+    debtor, eliminated = loop.game.turn_order
+    tile = loop.game.board.property_tiles[0]
+    loop.game.player_states[eliminated].is_bankrupt = True
+    loop.game.player_states[debtor].money = 0
+    loop.game.property_states[tile.tile_id].owner_id = debtor
+    loop.game.property_states[tile.tile_id].is_mortgaged = True
+    loop.game.debts.append(Debt(debtor, None, 100))
+    loop.game.debt_resolution = DebtResolutionState(
+        debtor_id=debtor,
+        negotiations_closed=True,
+        auctioned_property_ids={tile.tile_id},
+    )
+    loop.turn_phase = GameLoop.RESOLVE_DEBT
+
+    act(loop, A.DECLARE_BANKRUPTCY)
+
+    assert loop.game.game_over
+    assert loop.turn_phase == GameLoop.GAME_OVER
+    assert loop.game.winner_id is None
+    assert loop.game.property_states[tile.tile_id].owner_id is None
+    assert not loop.game.property_states[tile.tile_id].is_mortgaged
 
 
 def test_settled_debt_resumes_phase_after_mortgage_transfer(make_game):

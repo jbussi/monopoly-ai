@@ -9,6 +9,12 @@ from pettingzoo import AECEnv
 from pettingzoo.utils import wrappers
 
 from app.application.game_setup import create_game, load_selected_game
+from app.domain.analytics.decision_context import DecisionContext, evaluate_candidate
+from app.domain.analytics.decision_features import (
+    DecisionFeaturesEncoder,
+    EncodedDecisionContext,
+)
+from app.domain.game.actions import GameAction
 from app.envs.action_space_v2 import StructuredActionSpace
 from app.envs.observation_v2 import ObservationEncoderV2
 from app.envs.rewards import RewardFn, win_loss_reward
@@ -34,6 +40,8 @@ class raw_env(AECEnv):
         config: GameConfig | None = None,
         reward_fn: RewardFn = win_loss_reward,
         render_mode: str | None = None,
+        decision_horizons: tuple[int, ...] = (1, 3, 5),
+        max_decision_alternatives: int = 128,
     ) -> None:
         super().__init__()
         if not 2 <= num_players <= max_players <= 12:
@@ -44,13 +52,23 @@ class raw_env(AECEnv):
         self.config = config or load_selected_game()
         self.reward_fn = reward_fn
         self.render_mode = render_mode
+        self.decision_horizons = tuple(decision_horizons)
+        self.max_decision_alternatives = max_decision_alternatives
         self.loop = self._new_game(seed=None)
         self.action_map = StructuredActionSpace(
             self.loop, max_players, loop_provider=lambda: self.loop
         )
         self.encoder = ObservationEncoderV2(
-            self.loop, max_players, max_turns, self.action_map.jail_card_ids
+            self.loop, max_players, max_turns, self.action_map.jail_card_ids,
+            config=self.config,
         )
+        self.decision_features_encoder = DecisionFeaturesEncoder(
+            self.loop,
+            max_players=self.max_players,
+            max_alternatives=self.max_decision_alternatives,
+            horizons=self.decision_horizons,
+        )
+        self.decision_features_space = self.decision_features_encoder.observation_space
         self.possible_agents = [f"player_{i}" for i in range(num_players)]
         self.observation_spaces = {
             agent: spaces.Dict({
@@ -85,8 +103,16 @@ class raw_env(AECEnv):
             self.loop, self.max_players, loop_provider=lambda: self.loop
         )
         self.encoder = ObservationEncoderV2(
-            self.loop, self.max_players, self.max_turns, self.action_map.jail_card_ids
+            self.loop, self.max_players, self.max_turns, self.action_map.jail_card_ids,
+            config=self.config,
         )
+        self.decision_features_encoder = DecisionFeaturesEncoder(
+            self.loop,
+            max_players=self.max_players,
+            max_alternatives=self.max_decision_alternatives,
+            horizons=self.decision_horizons,
+        )
+        self.decision_features_space = self.decision_features_encoder.observation_space
         self.agents = list(self.possible_agents)
         self.rewards = {agent: 0.0 for agent in self.agents}
         self._cumulative_rewards = {agent: 0.0 for agent in self.agents}
@@ -128,6 +154,57 @@ class raw_env(AECEnv):
             for values in mask.values():
                 values.fill(0)
         return mask
+
+    def evaluate_candidate(
+        self,
+        agent: str,
+        action: dict[str, Any] | GameAction,
+        *,
+        baseline_action: dict[str, Any] | GameAction | None = None,
+        **options: Any,
+    ) -> DecisionContext:
+        """Fetch conditional decision features for one acting PettingZoo agent."""
+        player_id = self._player_id(agent)
+        if player_id != self.loop.current_decision_player_id:
+            raise ValueError("Só o agente selecionado pode avaliar uma ação.")
+        candidate = (
+            action if isinstance(action, GameAction)
+            else self.action_map.to_game_action(action, self.loop)
+        )
+        if isinstance(baseline_action, GameAction):
+            baseline = baseline_action
+        elif baseline_action is not None:
+            baseline = self.action_map.to_game_action(baseline_action, self.loop)
+        else:
+            baseline = None
+        return evaluate_candidate(
+            self.loop,
+            self.config,
+            player_id,
+            candidate,
+            baseline_action=baseline,
+            **options,
+        )
+
+    def evaluate_candidate_features(
+        self,
+        agent: str,
+        action: dict[str, Any] | GameAction,
+        *,
+        baseline_action: dict[str, Any] | GameAction | None = None,
+        **options: Any,
+    ) -> EncodedDecisionContext:
+        """Evaluate an agent's candidate and encode it for a fixed-shape model."""
+        context = self.evaluate_candidate(
+            agent,
+            action,
+            baseline_action=baseline_action,
+            **options,
+        )
+        return EncodedDecisionContext(
+            context=context,
+            features=self.decision_features_encoder.encode(context),
+        )
 
     def step(self, action: dict[str, Any] | None) -> None:
         agent = self.agent_selection

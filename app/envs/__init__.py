@@ -2,6 +2,11 @@
 
 from .action_space import DiscreteActionSpace
 from .baselines import GreedyPolicy, Policy, RandomPolicy
+from .cash_flow_forecast import (
+    CashFlowForecast,
+    CashFlowHorizonForecast,
+    forecast_cash_flow,
+)
 from .encoding import ObservationEncoder
 from .rewards import RewardFn, win_loss_reward
 from .text import describe_action, render_text
@@ -11,6 +16,8 @@ ENV_VERSION_V2 = 2
 
 __all__ = [
     "DiscreteActionSpace",
+    "CashFlowForecast",
+    "CashFlowHorizonForecast",
     "ENV_VERSION",
     "ENV_VERSION_V2",
     "GreedyPolicy",
@@ -23,6 +30,7 @@ __all__ = [
     "RewardFn",
     "StructuredActionSpace",
     "describe_action",
+    "forecast_cash_flow",
     "render_text",
     "win_loss_reward",
 ]

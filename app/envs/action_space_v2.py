@@ -63,7 +63,12 @@ def _scalar(value: Any) -> int:
     array = np.asarray(value)
     if array.size != 1:
         raise ValueError("Campos escalares da ação devem ter exatamente um valor.")
-    return int(array.reshape(-1)[0])
+    scalar = array.reshape(-1)[0]
+    if isinstance(scalar, (bool, np.bool_)) or not isinstance(
+        scalar, (int, np.integer)
+    ):
+        raise TypeError("Campos escalares da ação devem conter um inteiro.")
+    return int(scalar)
 
 
 class StructuredActionSpace:
@@ -113,6 +118,8 @@ class StructuredActionSpace:
             "requested_jail_cards": spaces.MultiBinary(len(self.jail_card_ids)),
             # Rows: auction amount, cash offered, cash requested. Columns: inclusive min/max.
             "money_bounds": spaces.Box(0, INT32_MAX, shape=(3, 2), dtype=np.int32),
+            # [offer must be nonempty, debt offer must increase debtor cash].
+            "trade_requirements": spaces.MultiBinary(2),
         })
 
     @staticmethod
@@ -137,6 +144,8 @@ class StructuredActionSpace:
         return bits
 
     def to_game_action(self, action: Mapping[str, Any], loop: GameLoop) -> GameAction:
+        if not self.action_space.contains(action):
+            raise ValueError("A ação não corresponde ao formato e aos tipos do espaço estruturado v2.")
         kind_index = _scalar(action["action_type"])
         try:
             kind = INDEX_TO_ACTION_TYPE[kind_index]
@@ -261,6 +270,7 @@ class StructuredActionSpace:
             "offered_jail_cards": np.zeros(len(self.jail_card_ids), dtype=np.int8),
             "requested_jail_cards": np.zeros(len(self.jail_card_ids), dtype=np.int8),
             "money_bounds": np.zeros((3, 2), dtype=np.int32),
+            "trade_requirements": np.zeros(2, dtype=np.int8),
         }
         if loop.game.game_over:
             return mask
@@ -287,6 +297,13 @@ class StructuredActionSpace:
         trade_actions = set(loop.available_trade_actions())
         for kind in trade_actions:
             mask["action_type"][ACTION_TYPE_TO_INDEX[kind]] = 1
+
+        relevant_trade_actions = (
+            trade_actions if action_type is None else {action_type} & trade_actions
+        )
+        if relevant_trade_actions & {ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE}:
+            mask["trade_requirements"][0] = 1
+            mask["trade_requirements"][1] = int(bool(loop.game.debts))
 
         if action_type is None:
             return self._fill_union_parameter_masks(mask, loop, actor, trade_actions)
