@@ -44,6 +44,18 @@ class CardDeck(ABC):
         """Embaralha as cartas disponíveis."""
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def card_ids(self) -> tuple[str, ...]:
+        """IDs estáveis usados para descrever a composição pública do baralho."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def public_composition(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Contagens por ID nas pilhas de compra e descarte, sem revelar ordem."""
+        raise NotImplementedError
+
 
 class StandardCardDeck(CardDeck):
     """
@@ -66,6 +78,7 @@ class StandardCardDeck(CardDeck):
         if len(ids) != len(set(ids)):
             raise ValueError("Os IDs das cartas devem ser únicos no baralho.")
 
+        self._all_cards = tuple(cards)
         self._cards = list(cards)
         self._discard_pile: list[CardLike] = []
         self._rng = random.Random(seed)
@@ -76,6 +89,21 @@ class StandardCardDeck(CardDeck):
     @property
     def remaining(self) -> int:
         return len(self._cards)
+
+    @property
+    def card_ids(self) -> tuple[str, ...]:
+        """Stable card-ID order for public, order-free deck observations."""
+        return tuple(card.id for card in self._all_cards)
+
+    @property
+    def public_composition(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Counts per card ID in draw and discard piles, never their order."""
+        ids = self.card_ids
+        draw_counts = tuple(sum(card.id == card_id for card in self._cards) for card_id in ids)
+        discard_counts = tuple(
+            sum(card.id == card_id for card in self._discard_pile) for card_id in ids
+        )
+        return draw_counts, discard_counts
 
     @property
     def discarded(self) -> int:

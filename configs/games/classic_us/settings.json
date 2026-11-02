@@ -20,14 +20,15 @@
   "auctionMinBid": 1,
   "auctionTimeoutSeconds": 30,
 
-  "freeParkingJackpot": false,
-
   "maxPlayers": 12,
   "minPlayersToStart": 2,
 
   "allowSpectators": true,
 
   "tradeEnabled": true,
+  "tradeMaxCounteroffers": 3,
+  "debtResolutionEnabled": true,
+  "debtNegotiationsPerPlayer": 3,
 
   "bankruptcyToBank": true,
 

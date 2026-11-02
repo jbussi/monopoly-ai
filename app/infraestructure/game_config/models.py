@@ -96,11 +96,13 @@ class GameSettings:
     auction_min_bid: int
     auction_timeout_seconds: int
 
-    free_parking_jackpot: bool
     max_players: int
     min_players_to_start: int
     allow_spectators: bool
     trade_enabled: bool
+    trade_max_counteroffers: int
+    debt_resolution_enabled: bool
+    debt_negotiations_per_player: int
     bankruptcy_to_bank: bool
 
     player_colors: tuple[dict[str, Any], ...]

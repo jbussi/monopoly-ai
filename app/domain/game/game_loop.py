@@ -3,6 +3,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from .auction import (
+    AuctionDecisionRecord,
+    AuctionParticipantSnapshot,
+    AuctionPropertySnapshot,
+    AuctionResultRecord,
+    AuctionSessionRecord,
+)
 from .actions import ActionType, GameAction
 from .board import PropertyKind, PropertyTile, SpecialTile, TaxTile
 from .card_actions import (
@@ -11,12 +18,21 @@ from .card_actions import (
     CardExecutionResult,
     CardLike,
 )
-from .game_state import HOTEL_LEVEL, Debt, GameState
+from .game_state import DebtResolutionState, HOTEL_LEVEL, Debt, GameState
+from .trade import (
+    TradeContextRecord,
+    TradeDecisionRecord,
+    TradeOffer,
+    TradePlayerContext,
+    TradePropertyContext,
+    payload_to_offer,
+)
 
 # Incrementos sobre o maior lance que `legal_actions` oferece num leilão.
 # `process_action` aceita qualquer lance inteiro válido; a lista existe para
 # dar um conjunto finito de opções a agentes.
 AUCTION_BID_INCREMENTS: tuple[int, ...] = (1, 10, 50, 100)
+MORTGAGE_TRANSFER_INTEREST_PERCENT = 10
 
 MANAGEMENT_ACTIONS = (
     ActionType.BUILD_HOUSE,
@@ -34,6 +50,7 @@ class GameLoop:
     AUCTION = "AUCTION"
     AFTER_ROLL = "AFTER_ROLL"
     RESOLVE_DEBT = "RESOLVE_DEBT"
+    RESOLVE_MORTGAGE_TRANSFER = "RESOLVE_MORTGAGE_TRANSFER"
     GAME_OVER = "GAME_OVER"
 
     PHASE_ACTIONS: dict[str, tuple[str, ...]] = {
@@ -41,6 +58,10 @@ class GameLoop:
             ActionType.ROLL_DICE,
             ActionType.PAY_JAIL_FINE,
             ActionType.USE_JAIL_CARD,
+            ActionType.PROPOSE_TRADE,
+            ActionType.ACCEPT_TRADE,
+            ActionType.REJECT_TRADE,
+            ActionType.COUNTER_TRADE,
             *MANAGEMENT_ACTIONS,
         ),
         AWAITING_PROPERTY_DECISION: (
@@ -53,7 +74,17 @@ class GameLoop:
         RESOLVE_DEBT: (
             ActionType.SELL_HOUSE,
             ActionType.MORTGAGE,
+            ActionType.PROPOSE_TRADE,
+            ActionType.ACCEPT_TRADE,
+            ActionType.REJECT_TRADE,
+            ActionType.COUNTER_TRADE,
+            ActionType.END_DEBT_NEGOTIATIONS,
+            ActionType.AUCTION_DEBT_PROPERTY,
             ActionType.DECLARE_BANKRUPTCY,
+        ),
+        RESOLVE_MORTGAGE_TRANSFER: (
+            ActionType.KEEP_MORTGAGE,
+            ActionType.REDEEM_MORTGAGE,
         ),
         GAME_OVER: (),
     }
@@ -74,6 +105,15 @@ class GameLoop:
         self._auction_pending: list[UUID] = []
         self._auction_highest_bid = 0
         self._auction_highest_bidder: UUID | None = None
+        self._trade_window_open = bool(self.rules.trade_enabled)
+        self._auction_for_debt = False
+        self._auction_for_bankruptcy = False
+        self._auction_seller_id: UUID | None = None
+        self._active_auction_id: int | None = None
+        self._bankruptcy_auction_queue: list[int] = []
+        self._bankruptcy_auction_player_id: UUID | None = None
+        self._mortgage_transfer_queue: list[tuple[UUID, int]] = []
+        self._mortgage_transfer_resume_phase = self.BEFORE_ROLL
 
     # ================================================================ consulta
 
@@ -84,8 +124,14 @@ class GameLoop:
 
     @property
     def current_decision_player_id(self) -> UUID:
+        if self.game.pending_trade is not None:
+            return self.game.pending_trade.current_offer.recipient_id
+
         if self.turn_phase == self.AUCTION and self._auction_pending:
             return self._auction_pending[0]
+
+        if self.turn_phase == self.RESOLVE_MORTGAGE_TRANSFER and self._mortgage_transfer_queue:
+            return self._mortgage_transfer_queue[0][0]
 
         if self.turn_phase == self.RESOLVE_DEBT and self.game.debts:
             return self.game.debts[0].debtor_id
@@ -107,6 +153,10 @@ class GameLoop:
     def auction_highest_bidder(self) -> UUID | None:
         return self._auction_highest_bidder
 
+    @property
+    def current_auction_id(self) -> int | None:
+        return self._active_auction_id
+
     def auction_bid_amount(self, increment: int) -> int:
         """Valor de um lance `increment` acima do maior lance atual."""
         return max(self.rules.auction_min_bid, self._auction_highest_bid + increment)
@@ -127,8 +177,23 @@ class GameLoop:
         if kind not in self.PHASE_ACTIONS[self.turn_phase]:
             return f"A ação {kind} não é permitida na fase {self.turn_phase}."
 
+        if self.game.pending_trade is not None and kind not in {
+            ActionType.ACCEPT_TRADE,
+            ActionType.REJECT_TRADE,
+            ActionType.COUNTER_TRADE,
+        }:
+            return "Responda à oferta pendente antes de continuar o turno."
+
         player_id = self.current_decision_player_id
         state = self.game.player_states[player_id]
+
+        if kind in {
+            ActionType.PROPOSE_TRADE,
+            ActionType.COUNTER_TRADE,
+            ActionType.ACCEPT_TRADE,
+            ActionType.REJECT_TRADE,
+        }:
+            return self._validate_trade_action(player_id, kind, action.payload)
 
         if kind == ActionType.PAY_JAIL_FINE:
             if not state.is_in_jail:
@@ -163,13 +228,274 @@ class GameLoop:
 
         elif kind == ActionType.DECLARE_BANKRUPTCY:
             amount_owed = self.game.amount_owed(player_id)
-            recoverable = state.money + self.game.liquidation_value(player_id)
-            if recoverable >= amount_owed:
-                return "Ainda há recursos suficientes para pagar as dívidas."
+            if amount_owed <= 0:
+                return "Não há dívida pendente para justificar a falência."
+            if not self.rules.debt_resolution_enabled:
+                recoverable = state.money + self.game.liquidation_value(player_id)
+                if recoverable >= amount_owed:
+                    return "Ainda há recursos suficientes para pagar as dívidas."
+            else:
+                resolution = self.game.debt_resolution
+                if resolution is None:
+                    return "A resolução da dívida ainda não foi iniciada."
+                if not resolution.negotiations_closed:
+                    return "Encerre as negociações antes da falência."
+                if self._debt_recovery_actions(player_id):
+                    return "Ainda há ações de liquidação bancária disponíveis."
+                if self._debt_auctionable_properties(player_id):
+                    return "Ainda há propriedades disponíveis para leilão."
 
+        elif kind == ActionType.END_DEBT_NEGOTIATIONS:
+            if not self.rules.debt_resolution_enabled or not self.game.debts:
+                return "Negociações de insolvência indisponíveis."
+            if self.game.pending_trade is not None:
+                return "Responda à oferta pendente antes de encerrar as negociações."
+            resolution = self.game.debt_resolution
+            if resolution is None or resolution.negotiations_closed:
+                return "As negociações já foram encerradas."
+
+        elif kind == ActionType.AUCTION_DEBT_PROPERTY:
+            reason = self._validate_debt_auction_action(player_id, action.payload)
+            if reason is not None:
+                return reason
+
+        elif kind in (ActionType.KEEP_MORTGAGE, ActionType.REDEEM_MORTGAGE):
+            if not self._mortgage_transfer_queue:
+                return "Não há imóvel hipotecado aguardando decisão."
+            owner_id, tile_id = self._mortgage_transfer_queue[0]
+            if owner_id != player_id or action.payload.get("tile_id") != tile_id:
+                return "A decisão deve corresponder ao imóvel recebido pelo jogador atual."
+            prop = self.game.property_states[tile_id]
+            if not prop.is_mortgaged or prop.owner_id != player_id:
+                return "O imóvel não está mais hipotecado pelo jogador atual."
+            if kind == ActionType.REDEEM_MORTGAGE:
+                tile = self.game.board.get_tile_by_id(tile_id)
+                if state.money < self.unmortgage_cost(tile):
+                    return "Saldo insuficiente para resgatar a hipoteca imediatamente."
         elif kind in MANAGEMENT_ACTIONS:
             return self._validate_management(player_id, kind, action.payload)
 
+        return None
+
+    def _debt_negotiation_targets(self, debtor_id: UUID) -> list[UUID]:
+        resolution = self.game.debt_resolution
+        if (
+            not self.rules.debt_resolution_enabled
+            or resolution is None
+            or resolution.negotiations_closed
+            or resolution.negotiations_started >= self.rules.debt_negotiations_per_player
+        ):
+            return []
+        attempted = resolution.negotiation_player_ids
+        return [
+            player_id for player_id in self.game.active_player_ids
+            if player_id != debtor_id and player_id not in attempted
+        ]
+
+    def debt_negotiation_targets(self) -> tuple[UUID, ...]:
+        """Active players the debtor has not approached during this debt episode."""
+        if self.game.debt_resolution is None:
+            return ()
+        return tuple(self._debt_negotiation_targets(self.game.debt_resolution.debtor_id))
+
+    def _debt_auctionable_properties(self, debtor_id: UUID) -> list[int]:
+        resolution = self.game.debt_resolution
+        if (
+            not self.rules.debt_resolution_enabled
+            or resolution is None
+            or not resolution.negotiations_closed
+        ):
+            return []
+        candidates = []
+        for tile in self.game.owned_tiles(debtor_id):
+            if tile.tile_id in resolution.auctioned_property_ids:
+                continue
+            group = self.game.board.group_members(tile.group)
+            if any(self.game.property_states[member.tile_id].houses for member in group):
+                continue
+            candidates.append(tile.tile_id)
+        return candidates
+
+    def _validate_debt_auction_action(
+        self, player_id: UUID, payload: dict[str, Any]
+    ) -> str | None:
+        resolution = self.game.debt_resolution
+        if not self.rules.debt_resolution_enabled or resolution is None:
+            return "Leilões de insolvência estão desabilitados."
+        if self.game.pending_trade is not None:
+            return "Responda à oferta pendente antes de iniciar um leilão."
+        if not resolution.negotiations_closed:
+            return "Encerre as negociações antes de leiloar propriedades."
+        if player_id != resolution.debtor_id:
+            return "Somente o devedor pode escolher uma propriedade para leiloar."
+        tile_id = payload.get("tile_id")
+        if (
+            not isinstance(tile_id, int)
+            or isinstance(tile_id, bool)
+            or tile_id not in self._debt_auctionable_properties(player_id)
+        ):
+            return "A propriedade não está disponível para leilão de insolvência."
+        return None
+
+    def _debt_recovery_actions(self, player_id: UUID) -> list[GameAction]:
+        """Return bank liquidation actions that are executable in the current state.
+
+        Eligibility is based on current executable actions, not the theoretical
+        total value of every building and mortgage owned by the debtor.
+        """
+        actions: list[GameAction] = []
+        for tile in self.game.owned_tiles(player_id):
+            payload = {"tile_id": tile.tile_id}
+            for kind in (ActionType.SELL_HOUSE, ActionType.MORTGAGE):
+                if self._validate_management(player_id, kind, payload) is None:
+                    actions.append(GameAction(kind, payload))
+        return actions
+
+    def _validate_trade_action(
+        self, player_id: UUID, kind: str, payload: dict[str, Any]
+    ) -> str | None:
+        if not self.rules.trade_enabled:
+            return "As trocas estão desabilitadas nesta variante."
+
+        debt_trade = bool(self.game.debts)
+        if debt_trade:
+            if (
+                not self.rules.debt_resolution_enabled
+                or self.turn_phase != self.RESOLVE_DEBT
+                or self.game.debt_resolution is None
+            ):
+                return "Negociações de insolvência indisponíveis nesta fase."
+        elif not self._trade_window_open:
+            return "A janela de negociação deste turno já foi encerrada."
+
+        negotiation = self.game.pending_trade
+        if kind == ActionType.PROPOSE_TRADE:
+            if negotiation is not None:
+                return "Já existe uma negociação aguardando resposta."
+            if debt_trade:
+                resolution = self.game.debt_resolution
+                if player_id != resolution.debtor_id:
+                    return "Somente o devedor pode iniciar uma negociação."
+                if resolution.negotiations_closed:
+                    return "As negociações de insolvência foram encerradas."
+                if resolution.negotiations_started >= self.rules.debt_negotiations_per_player:
+                    return "O limite de negociações de insolvência foi atingido."
+            elif player_id != self.game.current_player_id:
+                return "Só o jogador da vez pode iniciar uma negociação."
+            target = payload.get("target_player_id")
+            if isinstance(target, str):
+                try:
+                    target = UUID(target)
+                except ValueError:
+                    return "O destinatário da oferta não é um jogador válido."
+            if target not in self.game.players or target == player_id:
+                return "Escolha outro jogador ativo como destinatário."
+            if self.game.player_states[target].is_bankrupt:
+                return "Não é possível negociar com um jogador falido."
+            if debt_trade and target not in self._debt_negotiation_targets(player_id):
+                return "Esse jogador já participou de uma negociação desta insolvência."
+            try:
+                offer = payload_to_offer(payload, self.game.next_trade_id, player_id, target)
+            except (TypeError, ValueError) as exc:
+                return str(exc)
+            reason = self._validate_trade_offer(offer)
+            if reason:
+                return reason
+            if debt_trade and not self._debt_offer_improves_cash(offer):
+                return "Uma oferta de insolvência precisa gerar dinheiro líquido para o devedor."
+            return None
+
+        if negotiation is None:
+            return "Não há uma oferta aguardando resposta."
+        if negotiation.is_debt_trade != debt_trade:
+            return "A oferta não pertence a esta fase da partida."
+        offer = negotiation.current_offer
+        if player_id != offer.recipient_id:
+            return "Somente o destinatário da oferta pode responder."
+        if kind == ActionType.COUNTER_TRADE:
+            if negotiation.counteroffers_made >= self.rules.trade_max_counteroffers:
+                return "O limite de contrapropostas desta negociação foi atingido."
+            try:
+                counter = payload_to_offer(
+                    payload,
+                    offer.negotiation_id,
+                    offer.recipient_id,
+                    offer.proposer_id,
+                    negotiation.counteroffers_made + 1,
+                )
+            except (TypeError, ValueError) as exc:
+                return str(exc)
+            reason = self._validate_trade_offer(counter)
+            if reason:
+                return reason
+            if debt_trade and not self._debt_offer_improves_cash(counter):
+                return "Uma contraproposta de insolvência precisa gerar dinheiro líquido para o devedor."
+            return None
+        if kind in (ActionType.ACCEPT_TRADE, ActionType.REJECT_TRADE):
+            return self._validate_trade_offer(offer) if kind == ActionType.ACCEPT_TRADE else None
+        return "Ação de negociação desconhecida."
+
+    def _debt_offer_improves_cash(self, offer: TradeOffer) -> bool:
+        if not self.game.debts:
+            return True
+        debtor_id = self.game.debts[0].debtor_id
+        if offer.proposer_id == debtor_id:
+            return offer.money_requested > offer.money_offered
+        if offer.recipient_id == debtor_id:
+            return offer.money_offered > offer.money_requested
+        return False
+
+    def _validate_trade_offer(self, offer: TradeOffer) -> str | None:
+        game = self.game
+        proposer_id = offer.proposer_id
+        recipient_id = offer.recipient_id
+        if proposer_id == recipient_id:
+            return "Uma troca exige dois jogadores diferentes."
+        for player_id in (proposer_id, recipient_id):
+            if player_id not in game.players or game.player_states[player_id].is_bankrupt:
+                return "Os dois participantes precisam estar ativos."
+        if game.debts:
+            debtor_id = game.debts[0].debtor_id
+            if (
+                not self.rules.debt_resolution_enabled
+                or self.turn_phase != self.RESOLVE_DEBT
+                or debtor_id not in (proposer_id, recipient_id)
+            ):
+                return "Só o devedor e um jogador ativo podem negociar durante a insolvência."
+
+        if not any((
+            offer.money_offered, offer.money_requested, offer.properties_offered,
+            offer.properties_requested, offer.jail_cards_offered, offer.jail_cards_requested,
+        )):
+            return "A oferta precisa transferir ao menos um item."
+        if game.player_states[proposer_id].money < offer.money_offered:
+            return "O proponente não tem dinheiro suficiente para cumprir a oferta."
+        if game.player_states[recipient_id].money < offer.money_requested:
+            return "O destinatário não tem dinheiro suficiente para cumprir a oferta."
+
+        for owner_id, tile_ids in (
+            (proposer_id, offer.properties_offered),
+            (recipient_id, offer.properties_requested),
+        ):
+            for tile_id in tile_ids:
+                prop = game.property_states.get(tile_id)
+                if isinstance(tile_id, bool) or prop is None or prop.owner_id != owner_id:
+                    return f"O jogador não possui a propriedade {tile_id} incluída na oferta."
+                tile = game.board.get_tile_by_id(tile_id)
+                group = game.board.group_members(tile.group)
+                if any(game.property_states[member.tile_id].houses for member in group):
+                    return "Venda as construções de todo o grupo antes de negociar uma propriedade."
+
+        for owner_id, refs in (
+            (proposer_id, offer.jail_cards_offered),
+            (recipient_id, offer.jail_cards_requested),
+        ):
+            available = {
+                f"{deck_name}:{card.id}"
+                for deck_name, card in game.player_states[owner_id].jail_cards
+            }
+            if not set(refs).issubset(available):
+                return "A oferta contém uma carta de saída da prisão que o jogador não possui."
         return None
 
     def _validate_management(
@@ -199,7 +525,12 @@ class GameLoop:
                 return "O imóvel já possui hotel."
             if prop.houses > min(levels):
                 return "A construção deve ser uniforme no grupo."
-            if money < tile.house_cost:
+            build_cost = (
+                (tile.hotel_cost or tile.house_cost)
+                if prop.houses == HOTEL_LEVEL - 1
+                else tile.house_cost
+            )
+            if money < build_cost:
                 return "Saldo insuficiente para construir."
             if prop.houses == HOTEL_LEVEL - 1 and self.game.hotels_in_bank < 1:
                 return "Não há hotéis disponíveis no banco."
@@ -211,8 +542,6 @@ class GameLoop:
                 return "Não há construções para vender."
             if prop.houses < max(levels):
                 return "A venda deve ser uniforme no grupo."
-            if prop.houses == HOTEL_LEVEL and self.game.houses_in_bank < HOTEL_LEVEL - 1:
-                return "Não há casas no banco para desfazer o hotel."
 
         elif kind == ActionType.MORTGAGE:
             if prop.is_mortgaged:
@@ -233,16 +562,75 @@ class GameLoop:
         candidates: list[GameAction] = []
 
         for kind in self.PHASE_ACTIONS[self.turn_phase]:
+            if kind in {
+                ActionType.PROPOSE_TRADE,
+                ActionType.ACCEPT_TRADE,
+                ActionType.REJECT_TRADE,
+                ActionType.COUNTER_TRADE,
+            }:
+                continue  # termos são estruturados e não cabem no espaço discreto legado
+            if (
+                kind in (ActionType.END_DEBT_NEGOTIATIONS, ActionType.AUCTION_DEBT_PROPERTY)
+                and not self.rules.debt_resolution_enabled
+            ):
+                continue
             if kind in MANAGEMENT_ACTIONS:
                 for tile in self.game.owned_tiles(self.current_decision_player_id):
                     candidates.append(GameAction(kind, {"tile_id": tile.tile_id}))
             elif kind == ActionType.AUCTION_BID:
                 amounts = sorted({self.auction_bid_amount(inc) for inc in AUCTION_BID_INCREMENTS})
                 candidates.extend(GameAction(kind, {"amount": a}) for a in amounts)
+            elif kind == ActionType.AUCTION_DEBT_PROPERTY:
+                candidates.extend(self.available_debt_auction_actions())
+            elif kind in (ActionType.KEEP_MORTGAGE, ActionType.REDEEM_MORTGAGE):
+                if self._mortgage_transfer_queue:
+                    candidates.append(
+                        GameAction(kind, {"tile_id": self._mortgage_transfer_queue[0][1]})
+                    )
             else:
                 candidates.append(GameAction(kind))
 
         return [action for action in candidates if self.validate(action) is None]
+
+    def trade_response_actions(self) -> list[GameAction]:
+        """Finite responses to an offer; proposals/counters carry structured terms."""
+        if self.game.pending_trade is None:
+            return []
+        actions = [
+            GameAction(ActionType.ACCEPT_TRADE),
+            GameAction(ActionType.REJECT_TRADE),
+        ]
+        if self.game.pending_trade.counteroffers_made < self.rules.trade_max_counteroffers:
+            actions.append(GameAction(ActionType.COUNTER_TRADE))
+        return actions
+
+    def available_debt_auction_actions(self) -> list[GameAction]:
+        """Property choices available to the debtor after negotiations close."""
+        if self.turn_phase != self.RESOLVE_DEBT or self.game.debt_resolution is None:
+            return []
+        debtor = self.game.debt_resolution.debtor_id
+        return [
+            GameAction(ActionType.AUCTION_DEBT_PROPERTY, {"tile_id": tile_id})
+            for tile_id in self._debt_auctionable_properties(debtor)
+        ]
+
+    def available_trade_actions(self) -> tuple[str, ...]:
+        """Structured trade commands available outside the legacy discrete action list."""
+        if not self.rules.trade_enabled:
+            return ()
+        if self.game.debts:
+            if not self.rules.debt_resolution_enabled or self.turn_phase != self.RESOLVE_DEBT:
+                return ()
+            if self.game.pending_trade is not None:
+                return tuple(action.action_type for action in self.trade_response_actions())
+            if self.debt_negotiation_targets():
+                return (ActionType.PROPOSE_TRADE,)
+            return ()
+        if not self._trade_window_open:
+            return ()
+        if self.game.pending_trade is None:
+            return (ActionType.PROPOSE_TRADE,)
+        return tuple(action.action_type for action in self.trade_response_actions())
 
     # ============================================================ processamento
 
@@ -260,6 +648,7 @@ class GameLoop:
         return result
 
     def _handle_roll_dice(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        self._trade_window_open = False
         state = self.game.player_states[player_id]
         roll = self.game.dice.roll()
         self.game.last_roll = roll
@@ -340,6 +729,273 @@ class GameLoop:
         self._next_turn()
         return self._success(event="TURN_ENDED")
 
+    def _handle_propose_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        target = action.payload.get("target_player_id")
+        if isinstance(target, str):
+            target = UUID(target)
+        offer = payload_to_offer(
+            action.payload, self.game.next_trade_id, player_id, target
+        )
+        is_debt_trade = bool(self.game.debts)
+        if is_debt_trade:
+            resolution = self.game.debt_resolution
+            resolution.negotiations_started += 1
+            resolution.negotiation_player_ids.add(target)
+        self.game.next_trade_id += 1
+        self.game.pending_trade = self._new_negotiation(offer, is_debt_trade)
+        self.game.trade_history.append(offer)
+        self._record_trade_context(offer, is_debt_trade)
+        self.game.log_event("TRADE_PROPOSED", self._trade_event_data(offer))
+        return self._success(event="TRADE_PROPOSED", negotiation_id=offer.negotiation_id)
+
+    def _handle_accept_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        negotiation = self.game.pending_trade
+        offer = negotiation.current_offer
+        self._apply_trade(offer)
+        self._record_trade_decision(offer, player_id, "ACCEPTED")
+        self.game.log_event("TRADE_ACCEPTED", self._trade_event_data(offer))
+        self.game.pending_trade = None
+        self._trade_window_open = False
+        if self._mortgage_transfer_queue:
+            self.turn_phase = self.RESOLVE_MORTGAGE_TRANSFER
+        return self._success(event="TRADE_ACCEPTED", negotiation_id=offer.negotiation_id)
+
+    def _handle_keep_mortgage(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        _, tile_id = self._mortgage_transfer_queue.pop(0)
+        tile = self.game.board.get_tile_by_id(tile_id)
+        interest = (
+            tile.mortgage_value * MORTGAGE_TRANSFER_INTEREST_PERCENT + 99
+        ) // 100
+        self._charge(
+            player_id,
+            interest,
+            None,
+            "MORTGAGE_TRANSFER_INTEREST",
+            tile_id=tile_id,
+        )
+        self.game.log_event(
+            "MORTGAGE_KEPT_AFTER_TRANSFER",
+            {"player_id": player_id, "tile_id": tile_id, "interest": interest},
+        )
+        if self.game.game_over or (
+            self.turn_phase == self.AUCTION and self._auction_for_bankruptcy
+        ):
+            return self._success(event="MORTGAGE_TRANSFER_RESOLVED")
+        return self._finish_mortgage_transfer_decision()
+
+    def _handle_redeem_mortgage(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        _, tile_id = self._mortgage_transfer_queue.pop(0)
+        tile = self.game.board.get_tile_by_id(tile_id)
+        cost = self.unmortgage_cost(tile)
+        self.game.player_states[player_id].money -= cost
+        self.game.property_states[tile_id].is_mortgaged = False
+        self.game.log_event(
+            "MORTGAGE_REDEEMED_AFTER_TRANSFER",
+            {"player_id": player_id, "tile_id": tile_id, "amount": cost},
+        )
+        return self._finish_mortgage_transfer_decision()
+
+    def _finish_mortgage_transfer_decision(self) -> dict[str, Any]:
+        destination = (
+            self.RESOLVE_MORTGAGE_TRANSFER
+            if self._mortgage_transfer_queue
+            else self._mortgage_transfer_resume_phase
+        )
+        if self.game.debts:
+            self._resume_phase = destination
+            self.turn_phase = self.RESOLVE_DEBT
+        else:
+            self.turn_phase = destination
+        return self._success(event="MORTGAGE_TRANSFER_RESOLVED")
+
+    def _handle_reject_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        offer = self.game.pending_trade.current_offer
+        self._record_trade_decision(offer, player_id, "REJECTED")
+        self.game.log_event("TRADE_REJECTED", self._trade_event_data(offer))
+        self.game.pending_trade = None
+        self._trade_window_open = False
+        return self._success(event="TRADE_REJECTED", negotiation_id=offer.negotiation_id)
+
+    def _handle_counter_trade(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        negotiation = self.game.pending_trade
+        previous = negotiation.current_offer
+        self._record_trade_decision(previous, player_id, "COUNTERED")
+        offer = payload_to_offer(
+            action.payload,
+            previous.negotiation_id,
+            previous.recipient_id,
+            previous.proposer_id,
+            negotiation.counteroffers_made + 1,
+        )
+        negotiation.current_offer = offer
+        negotiation.counteroffers_made += 1
+        self.game.trade_history.append(offer)
+        self._record_trade_context(offer, negotiation.is_debt_trade)
+        self.game.log_event("TRADE_COUNTEROFFERED", self._trade_event_data(offer))
+        return self._success(
+            event="TRADE_COUNTEROFFERED",
+            negotiation_id=offer.negotiation_id,
+            counteroffers_made=negotiation.counteroffers_made,
+        )
+
+    def _handle_end_debt_negotiations(
+        self, player_id: UUID, action: GameAction
+    ) -> dict[str, Any]:
+        self.game.debt_resolution.negotiations_closed = True
+        self.game.log_event("DEBT_NEGOTIATIONS_CLOSED", {"debtor_id": player_id})
+        return self._success(event="DEBT_NEGOTIATIONS_CLOSED")
+
+    def _handle_auction_debt_property(
+        self, player_id: UUID, action: GameAction
+    ) -> dict[str, Any]:
+        tile_id = action.payload["tile_id"]
+        self.game.debt_resolution.auctioned_property_ids.add(tile_id)
+        self._start_debt_auction(tile_id, player_id)
+        self.game.log_event(
+            "DEBT_PROPERTY_AUCTION_STARTED",
+            {"debtor_id": player_id, "tile_id": tile_id},
+        )
+        return self._success(event="DEBT_PROPERTY_AUCTION_STARTED", tile_id=tile_id)
+
+    @staticmethod
+    def _new_negotiation(offer: TradeOffer, is_debt_trade: bool = False):
+        from .trade import TradeNegotiation
+        return TradeNegotiation(current_offer=offer, is_debt_trade=is_debt_trade)
+
+    def _record_trade_decision(
+        self,
+        offer: TradeOffer,
+        responder_id: UUID,
+        response: str,
+    ) -> None:
+        self.game.trade_decision_history.append(
+            TradeDecisionRecord(
+                negotiation_id=offer.negotiation_id,
+                counteroffer_number=offer.counteroffer_number,
+                responder_id=responder_id,
+                response=response,
+                turn=self.game.turn_counter,
+            )
+        )
+
+    def _record_trade_context(self, offer: TradeOffer, is_debt_trade: bool) -> None:
+        game = self.game
+        players = tuple(
+            TradePlayerContext(
+                player_id=player_id,
+                money=game.player_states[player_id].money,
+                position=game.position_of(player_id),
+                is_in_jail=game.player_states[player_id].is_in_jail,
+                is_bankrupt=game.player_states[player_id].is_bankrupt,
+                net_worth=game.net_worth(player_id),
+                amount_owed=game.amount_owed(player_id),
+                jail_cards=tuple(
+                    f"{deck_name}:{card.id}"
+                    for deck_name, card in game.player_states[player_id].jail_cards
+                ),
+            )
+            for player_id in game.turn_order
+        )
+        properties = tuple(
+            TradePropertyContext(
+                tile_id=tile.tile_id,
+                owner_id=game.property_states[tile.tile_id].owner_id,
+                houses=game.property_states[tile.tile_id].houses,
+                is_mortgaged=game.property_states[tile.tile_id].is_mortgaged,
+            )
+            for tile in game.board.property_tiles
+        )
+        game.trade_context_history.append(
+            TradeContextRecord(
+                negotiation_id=offer.negotiation_id,
+                counteroffer_number=offer.counteroffer_number,
+                turn=game.turn_counter,
+                phase=self.turn_phase,
+                is_debt_trade=is_debt_trade,
+                players=players,
+                properties=properties,
+            )
+        )
+
+    @staticmethod
+    def _trade_event_data(offer: TradeOffer) -> dict[str, Any]:
+        return {
+            "negotiation_id": offer.negotiation_id,
+            "proposer_id": offer.proposer_id,
+            "recipient_id": offer.recipient_id,
+            "money_offered": offer.money_offered,
+            "money_requested": offer.money_requested,
+            "properties_offered": offer.properties_offered,
+            "properties_requested": offer.properties_requested,
+            "jail_cards_offered": offer.jail_cards_offered,
+            "jail_cards_requested": offer.jail_cards_requested,
+            "counteroffer_number": offer.counteroffer_number,
+        }
+
+    def _apply_trade(self, offer: TradeOffer) -> None:
+        """Transfer all consideration and assets after complete revalidation."""
+        reason = self._validate_trade_offer(offer)
+        if reason:
+            raise RuntimeError(f"Oferta deixou de ser válida antes da execução: {reason}")
+        game = self.game
+        game.player_states[offer.proposer_id].money -= offer.money_offered
+        game.player_states[offer.proposer_id].money += offer.money_requested
+        game.player_states[offer.recipient_id].money -= offer.money_requested
+        game.player_states[offer.recipient_id].money += offer.money_offered
+
+        mortgage_interest_due: list[tuple[UUID, int]] = []
+        for tile_id in offer.properties_offered:
+            prop = game.property_states[tile_id]
+            prop.owner_id = offer.recipient_id
+            if prop.is_mortgaged:
+                mortgage_interest_due.append((offer.recipient_id, tile_id))
+        for tile_id in offer.properties_requested:
+            prop = game.property_states[tile_id]
+            prop.owner_id = offer.proposer_id
+            if prop.is_mortgaged:
+                mortgage_interest_due.append((offer.proposer_id, tile_id))
+
+        for owner_id, receiver_id, refs in (
+            (offer.proposer_id, offer.recipient_id, offer.jail_cards_offered),
+            (offer.recipient_id, offer.proposer_id, offer.jail_cards_requested),
+        ):
+            owner_cards = game.player_states[owner_id].jail_cards
+            selected = [
+                item for item in owner_cards if f"{item[0]}:{item[1].id}" in refs
+            ]
+            game.player_states[owner_id].jail_cards = [
+                item for item in owner_cards if f"{item[0]}:{item[1].id}" not in refs
+            ]
+            game.player_states[receiver_id].jail_cards.extend(selected)
+
+        self._queue_mortgage_transfer_decisions(mortgage_interest_due)
+
+    def _queue_mortgage_transfer_decisions(
+        self,
+        transfers: list[tuple[UUID, int]],
+        *,
+        resume_phase: str | None = None,
+    ) -> None:
+        transfers = [
+            (owner_id, tile_id)
+            for owner_id, tile_id in transfers
+            if self.game.property_states[tile_id].is_mortgaged
+        ]
+        if not transfers:
+            return
+        if not self._mortgage_transfer_queue:
+            self._mortgage_transfer_resume_phase = (
+                (
+                    self._resume_phase
+                    if self.turn_phase == self.RESOLVE_DEBT
+                    else self.turn_phase
+                )
+                if resume_phase is None
+                else resume_phase
+            )
+        self._mortgage_transfer_queue.extend(transfers)
+        self.turn_phase = self.RESOLVE_MORTGAGE_TRANSFER
+
     def _handle_declare_bankruptcy(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         self._bankrupt(player_id, self._bankruptcy_creditor(player_id))
         return self._success(event="BANKRUPTCY")
@@ -347,11 +1003,16 @@ class GameLoop:
     def _handle_build_house(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         tile = self.game.board.get_tile_by_id(action.payload["tile_id"])
         prop = self.game.property_states[tile.tile_id]
-        self.game.player_states[player_id].money -= tile.house_cost
+        build_cost = (
+            (tile.hotel_cost or tile.house_cost)
+            if prop.houses == HOTEL_LEVEL - 1
+            else tile.house_cost
+        )
+        self.game.player_states[player_id].money -= build_cost
 
         if prop.houses == HOTEL_LEVEL - 1:
             self.game.hotels_in_bank -= 1
-            self.game.houses_in_bank += HOTEL_LEVEL - 1
+            self.game.return_houses_to_bank(HOTEL_LEVEL - 1)
         else:
             self.game.houses_in_bank -= 1
         prop.houses += 1
@@ -368,11 +1029,13 @@ class GameLoop:
 
         if prop.houses == HOTEL_LEVEL:
             self.game.hotels_in_bank += 1
-            self.game.houses_in_bank -= HOTEL_LEVEL - 1
+            self.game.supply_houses_for_hotel_sale(HOTEL_LEVEL - 1)
+            refund = (tile.hotel_cost or tile.house_cost) // 2
         else:
-            self.game.houses_in_bank += 1
+            self.game.return_houses_to_bank(1)
+            refund = tile.house_cost // 2
         prop.houses -= 1
-        self.game.player_states[player_id].money += tile.house_cost // 2
+        self.game.player_states[player_id].money += refund
 
         self.game.log_event(
             "BUILDING_SOLD",
@@ -397,6 +1060,9 @@ class GameLoop:
     # ================================================================== leilão
 
     def _start_auction(self, tile_id: int) -> None:
+        self._auction_for_debt = False
+        self._auction_for_bankruptcy = False
+        self._auction_seller_id = None
         self._auction_tile_id = tile_id
         # Começa pelo jogador da vez e segue a ordem da mesa
         order = self.game.active_player_ids
@@ -406,9 +1072,61 @@ class GameLoop:
         self._auction_highest_bid = 0
         self._auction_highest_bidder = None
         self.turn_phase = self.AUCTION
+        self._record_auction_start("BANK")
+
+    def _start_debt_auction(self, tile_id: int, seller_id: UUID) -> None:
+        self._auction_for_debt = True
+        self._auction_for_bankruptcy = False
+        self._auction_seller_id = seller_id
+        self._auction_tile_id = tile_id
+        order = self.game.turn_order
+        start = (order.index(seller_id) + 1) % len(order)
+        self._auction_active = [
+            order[(start + offset) % len(order)]
+            for offset in range(len(order))
+            if order[(start + offset) % len(order)] in self.game.active_player_ids
+            and order[(start + offset) % len(order)] != seller_id
+        ]
+        self._auction_pending = self._auction_active.copy()
+        self._auction_highest_bid = 0
+        self._auction_highest_bidder = None
+        self.turn_phase = self.AUCTION
+        self._record_auction_start("DEBT")
+        if not self._auction_pending:
+            # The debtor cannot bid on their own property. If no other player
+            # remains active, resolve this as an auction with no bids now;
+            # otherwise AUCTION would have no actor and could expose a
+            # bankrupt player as current_decision_player_id.
+            self._finish_auction()
+
+    def _start_bankruptcy_auction(self, tile_id: int, bankrupt_player_id: UUID) -> None:
+        """Auction a bank-repossessed property among all remaining players."""
+        self._auction_for_debt = False
+        self._auction_for_bankruptcy = True
+        self._auction_seller_id = None
+        self._auction_tile_id = tile_id
+        self._bankruptcy_auction_player_id = bankrupt_player_id
+        order = self.game.turn_order
+        start = (order.index(bankrupt_player_id) + 1) % len(order)
+        active = set(self.game.active_player_ids)
+        self._auction_active = [
+            order[(start + offset) % len(order)]
+            for offset in range(len(order))
+            if order[(start + offset) % len(order)] in active
+        ]
+        self._auction_pending = self._auction_active.copy()
+        self._auction_highest_bid = 0
+        self._auction_highest_bidder = None
+        self.turn_phase = self.AUCTION
+        self._record_auction_start("BANKRUPTCY")
+        if not self._auction_pending:
+            # Repossessed assets still need their no-bid outcome applied so
+            # bankruptcy settlement can finish even when there are no bidders.
+            self._finish_auction()
 
     def _handle_auction_bid(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
         amount = action.payload["amount"]
+        self._record_auction_decision(player_id, "BID", amount)
         self._auction_highest_bid = amount
         self._auction_highest_bidder = player_id
         self.game.log_event(
@@ -419,10 +1137,12 @@ class GameLoop:
         # Todos os outros ainda ativos voltam a decidir, na ordem da mesa
         idx = self._auction_active.index(player_id)
         rotated = self._auction_active[idx + 1:] + self._auction_active[:idx]
+        rotated = [candidate for candidate in rotated if candidate != player_id]
         self._auction_pending = rotated
         return self._advance_auction()
 
     def _handle_auction_withdraw(self, player_id: UUID, action: GameAction) -> dict[str, Any]:
+        self._record_auction_decision(player_id, "WITHDRAW", None)
         self._auction_pending.remove(player_id)
         self._auction_active.remove(player_id)
         self.game.log_event(
@@ -445,23 +1165,167 @@ class GameLoop:
         winner_id = self._auction_highest_bidder
         amount = self._auction_highest_bid
 
+        debt_auction = self._auction_for_debt
+        bankruptcy_auction = self._auction_for_bankruptcy
+        seller_id = self._auction_seller_id
+        auction_type = "DEBT" if debt_auction else "BANKRUPTCY" if bankruptcy_auction else "BANK"
+        if self._active_auction_id is None:
+            raise RuntimeError("Leilão sem identificador de sessão ativo.")
+        self.game.auction_result_history.append(
+            AuctionResultRecord(
+                auction_id=self._active_auction_id,
+                tile_id=tile_id,
+                turn=self.game.turn_counter,
+                winner_id=winner_id,
+                winning_bid=amount,
+                seller_id=seller_id,
+                auction_type=auction_type,
+            )
+        )
+        self._active_auction_id = None
+        mortgage_transfer: list[tuple[UUID, int]] = []
         if winner_id is not None:
             # O lance nunca excede o saldo, e o saldo não muda durante o leilão
             self.game.player_states[winner_id].money -= amount
-            self.game.property_states[tile_id].owner_id = winner_id
-            self.game.log_event(
-                "AUCTION_WON",
-                {"player_id": winner_id, "tile_id": tile_id, "amount": amount},
-            )
+            prop = self.game.property_states[tile_id]
+            was_mortgaged = prop.is_mortgaged
+            prop.owner_id = winner_id
+            if debt_auction:
+                self.game.player_states[seller_id].money += amount
+                event = "DEBT_PROPERTY_AUCTION_WON"
+                payload = {
+                    "debtor_id": seller_id,
+                    "player_id": winner_id,
+                    "tile_id": tile_id,
+                    "amount": amount,
+                }
+            elif bankruptcy_auction:
+                event = "BANKRUPTCY_PROPERTY_AUCTION_WON"
+                payload = {"player_id": winner_id, "tile_id": tile_id, "amount": amount}
+            else:
+                event = "AUCTION_WON"
+                payload = {"player_id": winner_id, "tile_id": tile_id, "amount": amount}
+            self.game.log_event(event, payload)
+            if debt_auction and was_mortgaged:
+                mortgage_transfer.append((winner_id, tile_id))
         else:
-            self.game.log_event("AUCTION_NO_BIDS", {"tile_id": tile_id})
+            if debt_auction:
+                event = "DEBT_PROPERTY_AUCTION_NO_BIDS"
+            elif bankruptcy_auction:
+                event = "BANKRUPTCY_PROPERTY_AUCTION_NO_BIDS"
+            else:
+                event = "AUCTION_NO_BIDS"
+            self.game.log_event(
+                event,
+                {
+                    "tile_id": tile_id,
+                    "debtor_id": seller_id,
+                    "bankrupt_player_id": self._bankruptcy_auction_player_id,
+                },
+            )
 
         self._auction_tile_id = None
         self._auction_active = []
         self._auction_pending = []
         self._auction_highest_bid = 0
         self._auction_highest_bidder = None
+        self._auction_for_debt = False
+        self._auction_for_bankruptcy = False
+        self._auction_seller_id = None
+        if debt_auction:
+            self._queue_mortgage_transfer_decisions(
+                mortgage_transfer,
+                resume_phase=self._resume_phase,
+            )
+            if not self._mortgage_transfer_queue:
+                self.turn_phase = self.RESOLVE_DEBT
+            return self._success(event=event, tile_id=tile_id)
+        if bankruptcy_auction:
+            if self._bankruptcy_auction_queue:
+                next_tile_id = self._bankruptcy_auction_queue.pop(0)
+                bankrupt_player_id = self._bankruptcy_auction_player_id
+                if bankrupt_player_id is None:
+                    raise RuntimeError("Leilão de falência sem jogador de origem.")
+                self._start_bankruptcy_auction(next_tile_id, bankrupt_player_id)
+                return self._success(
+                    event="BANKRUPTCY_AUCTION_CONTINUES",
+                    tile_id=next_tile_id,
+                )
+            if self._mortgage_transfer_queue:
+                self._bankruptcy_auction_player_id = None
+                self.turn_phase = self.RESOLVE_MORTGAGE_TRANSFER
+                return self._success(event="MORTGAGE_TRANSFER_RESUMED")
+            active = self.game.active_player_ids
+            if self.rules.is_game_over(len(active)) and not self.game.debts:
+                self.game.game_over = True
+                self.game.winner_id = active[0] if active else None
+                self.turn_phase = self.GAME_OVER
+                self.game.log_event("GAME_FINISHED", {"winner_id": self.game.winner_id})
+            else:
+                # _settle() resumes the turn interrupted by bankruptcy.
+                self.turn_phase = self.RESOLVE_DEBT
+            self._bankruptcy_auction_player_id = None
+            return self._success(event=event, tile_id=tile_id)
         return self._finish_property_resolution()
+
+    def _record_auction_start(self, auction_type: str) -> None:
+        game = self.game
+        auction_id = game.next_auction_id
+        game.next_auction_id += 1
+        self._active_auction_id = auction_id
+        game.auction_history.append(
+            AuctionSessionRecord(
+                auction_id=auction_id,
+                tile_id=self._auction_tile_id,
+                turn=game.turn_counter,
+                auction_type=auction_type,
+                seller_id=self._auction_seller_id,
+                opening_bid=self.rules.auction_min_bid,
+                participants=tuple(self._auction_active),
+                player_snapshots=tuple(
+                    AuctionParticipantSnapshot(
+                        player_id=player_id,
+                        money=game.player_states[player_id].money,
+                        net_worth=game.net_worth(player_id),
+                        position=game.position_of(player_id),
+                        is_in_jail=game.player_states[player_id].is_in_jail,
+                        amount_owed=game.amount_owed(player_id),
+                    )
+                    for player_id in game.turn_order
+                ),
+                property_snapshots=tuple(
+                    AuctionPropertySnapshot(
+                        tile_id=tile.tile_id,
+                        owner_id=game.property_states[tile.tile_id].owner_id,
+                        houses=game.property_states[tile.tile_id].houses,
+                        is_mortgaged=game.property_states[tile.tile_id].is_mortgaged,
+                    )
+                    for tile in game.board.property_tiles
+                ),
+            )
+        )
+
+    def _record_auction_decision(
+        self,
+        player_id: UUID,
+        action: str,
+        bid_amount: int | None,
+    ) -> None:
+        if self._active_auction_id is None:
+            raise RuntimeError("Decisão de leilão sem sessão ativa.")
+        self.game.auction_decision_history.append(
+            AuctionDecisionRecord(
+                auction_id=self._active_auction_id,
+                turn=self.game.turn_counter,
+                player_id=player_id,
+                action=action,
+                bid_amount=bid_amount,
+                highest_bid_before=self._auction_highest_bid,
+                leader_before=self._auction_highest_bidder,
+                money_before=self.game.player_states[player_id].money,
+                remaining_bidders=max(0, len(self._auction_active) - 1),
+            )
+        )
 
     # =============================================================== movimento
 
@@ -606,6 +1470,7 @@ class GameLoop:
         self.game.current_player_id = candidate
         self.game.turn_counter += 1
         self.turn_phase = self.BEFORE_ROLL
+        self._trade_window_open = bool(self.rules.trade_enabled)
 
     # ======================================================= dívida e falência
 
@@ -633,7 +1498,10 @@ class GameLoop:
 
         self.game.debts.append(Debt(player_id, creditor_id, amount))
         owed = self.game.amount_owed(player_id)
-        if state.money + self.game.liquidation_value(player_id) < owed:
+        if (
+            not self.rules.debt_resolution_enabled
+            and state.money + self.game.liquidation_value(player_id) < owed
+        ):
             # Nem vendendo tudo o jogador consegue pagar
             self._bankrupt(player_id, self._bankruptcy_creditor(player_id))
 
@@ -643,7 +1511,7 @@ class GameLoop:
             self.game.player_states[creditor_id].money += amount
 
     def _bankruptcy_creditor(self, player_id: UUID) -> UUID | None:
-        """Herda os bens o jogador credor, se for o único; senão, o banco."""
+        """Return the sole creditor; mixed or bank debts resolve to the bank."""
         creditors = {d.creditor_id for d in self.game.debts if d.debtor_id == player_id}
         return creditors.pop() if len(creditors) == 1 else None
 
@@ -652,38 +1520,69 @@ class GameLoop:
         state = game.player_states[player_id]
         game.log_event("BANKRUPTCY", {"player_id": player_id, "creditor_id": creditor_id})
         game.debts = [d for d in game.debts if d.debtor_id != player_id]
+        if (
+            game.debt_resolution is not None
+            and game.debt_resolution.debtor_id == player_id
+        ):
+            game.debt_resolution = None
 
         if player_id == game.current_player_id:
             self._pending_tile_id = None
 
+        to_bank = creditor_id is None or self.rules.bankruptcy_to_bank
+        bank_assets: list[int] = []
+        transferred_mortgages: list[int] = []
         for tile in game.owned_tiles(player_id):
             prop = game.property_states[tile.tile_id]
             if prop.houses:
-                # Construções voltam ao banco pela metade do custo
-                state.money += prop.houses * (tile.house_cost // 2)
                 if prop.houses == HOTEL_LEVEL:
+                    state.money += (
+                        4 * (tile.house_cost // 2)
+                        + ((tile.hotel_cost or tile.house_cost) // 2)
+                    )
                     game.hotels_in_bank += 1
+                    game.supply_houses_for_hotel_sale(HOTEL_LEVEL - 1)
                 else:
-                    game.houses_in_bank += prop.houses
+                    state.money += prop.houses * (tile.house_cost // 2)
+                    game.return_houses_to_bank(prop.houses)
                 prop.houses = 0
 
-            if creditor_id is None:
+            if to_bank:
+                # Bank auctions cancel mortgages before offering the deeds.
                 prop.owner_id = None
                 prop.is_mortgaged = False
+                bank_assets.append(tile.tile_id)
             else:
                 prop.owner_id = creditor_id
+                if prop.is_mortgaged:
+                    transferred_mortgages.append(tile.tile_id)
 
-        if creditor_id is None:
+        if to_bank:
+            surrendered_cash = state.money
             for deck_name, card in state.jail_cards:
                 game.decks[deck_name].return_card(card)
         else:
+            assert creditor_id is not None
             game.player_states[creditor_id].money += state.money
             game.player_states[creditor_id].jail_cards.extend(state.jail_cards)
-
+        if to_bank:
+            game.log_event(
+                "BANKRUPTCY_ASSETS_RETURNED_TO_BANK",
+                {
+                    "player_id": player_id,
+                    "cash": surrendered_cash,
+                    "property_ids": tuple(bank_assets),
+                    "creditor_id": creditor_id,
+                },
+            )
         state.jail_cards = []
         state.money = 0
         state.is_in_jail = False
         state.is_bankrupt = True
+        self._mortgage_transfer_queue = [
+            transfer for transfer in self._mortgage_transfer_queue
+            if transfer[0] != player_id
+        ]
 
         if player_id in self._auction_active:
             self._auction_active.remove(player_id)
@@ -691,7 +1590,26 @@ class GameLoop:
             self._auction_pending.remove(player_id)
 
         active = game.active_player_ids
-        if self.rules.is_game_over(len(active)):
+        if bank_assets:
+            self._bankruptcy_auction_player_id = player_id
+            self._bankruptcy_auction_queue = bank_assets[1:]
+            self._start_bankruptcy_auction(bank_assets[0], player_id)
+            return
+
+        if transferred_mortgages:
+            assert creditor_id is not None
+            resume_phase = (
+                self._resume_phase
+                if self.turn_phase == self.RESOLVE_DEBT
+                else self.turn_phase
+            )
+            self._queue_mortgage_transfer_decisions(
+                [(creditor_id, tile_id) for tile_id in transferred_mortgages],
+                resume_phase=resume_phase,
+            )
+            return
+
+        if self.rules.is_game_over(len(active)) and not game.debts:
             game.game_over = True
             game.winner_id = active[0] if len(active) == 1 else None
             game.debts = []
@@ -704,6 +1622,12 @@ class GameLoop:
         if game.game_over:
             self.turn_phase = self.GAME_OVER
             return
+        if self.turn_phase == self.RESOLVE_MORTGAGE_TRANSFER:
+            return
+        if self.turn_phase == self.AUCTION and (
+            self._auction_for_debt or self._auction_for_bankruptcy
+        ):
+            return
 
         while game.debts:
             debt = game.debts[0]
@@ -712,7 +1636,21 @@ class GameLoop:
             self._transfer(debt.debtor_id, debt.creditor_id, debt.amount)
             game.debts.pop(0)
 
+        if game.debts and self.rules.debt_resolution_enabled:
+            debtor_id = game.debts[0].debtor_id
+            if (
+                game.debt_resolution is None
+                or game.debt_resolution.debtor_id != debtor_id
+            ):
+                game.debt_resolution = DebtResolutionState(debtor_id)
+        elif not game.debts:
+            game.debt_resolution = None
+
         if game.debts:
+            if self.turn_phase == self.AUCTION and (
+                self._auction_for_debt or self._auction_for_bankruptcy
+            ):
+                return
             if self.turn_phase != self.RESOLVE_DEBT:
                 self._resume_phase = self.turn_phase
                 self.turn_phase = self.RESOLVE_DEBT
@@ -720,6 +1658,16 @@ class GameLoop:
 
         if self.turn_phase == self.RESOLVE_DEBT:
             self.turn_phase = self._resume_phase
+            if self.turn_phase == self.RESOLVE_DEBT:
+                self.turn_phase = self.AFTER_ROLL
+
+        active = game.active_player_ids
+        if self.rules.is_game_over(len(active)) and not game.debts:
+            game.game_over = True
+            game.winner_id = active[0] if active else None
+            self.turn_phase = self.GAME_OVER
+            game.log_event("GAME_FINISHED", {"winner_id": game.winner_id})
+            return
 
         if game.player_states[game.current_player_id].is_bankrupt:
             self._next_turn()

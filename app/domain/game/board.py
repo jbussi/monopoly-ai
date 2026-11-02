@@ -50,6 +50,7 @@ class PropertyTile(Tile):
     mortgage_value: int
     kind: str = PropertyKind.STREET
     house_cost: int = 0
+    hotel_cost: int = 0
     unmortgage_cost: int = 0
     # Aluguel sem casas quando o dono tem o grupo completo (só ruas)
     monopoly_rent: int | None = None
@@ -60,6 +61,8 @@ class PropertyTile(Tile):
 
         if self.mortgage_value < 0:
             raise ValueError("O valor de hipoteca não pode ser negativo.")
+        if self.house_cost < 0 or self.hotel_cost < 0:
+            raise ValueError("Os custos de construção não podem ser negativos.")
 
         if not self.rent_values:
             raise ValueError("A tabela de aluguéis não pode ser vazia.")

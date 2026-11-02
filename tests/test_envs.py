@@ -26,7 +26,7 @@ def test_pettingzoo_seed():
     seed_test(lambda: pettingzoo_env.env(num_players=4), num_cycles=300)
 
 
-def test_pettingzoo_full_episodes_are_zero_sum():
+def test_pettingzoo_full_episodes_follow_win_loss_rewards():
     env = pettingzoo_env.env(num_players=4)
     rng = np.random.default_rng(0)
     for episode in range(5):
@@ -36,7 +36,18 @@ def test_pettingzoo_full_episodes_are_zero_sum():
             obs, reward, term, trunc, _ = env.last()
             totals[agent] += reward
             env.step(None if term or trunc else int(rng.choice(np.flatnonzero(obs["action_mask"]))))
-        assert sorted(totals.values()) in ([-1, -1, -1, 1], [0, 0, 0, 0])
+        raw_env = env.unwrapped
+        game = raw_env.loop.game
+        expected = {}
+        for agent in env.possible_agents:
+            player_id = raw_env._player_id(agent)
+            if game.winner_id == player_id:
+                expected[agent] = 1.0
+            elif game.player_states[player_id].is_bankrupt:
+                expected[agent] = -1.0
+            else:
+                expected[agent] = 0.0
+        assert totals == expected
 
 
 def test_gymnasium_checker():
@@ -56,7 +67,10 @@ def test_gymnasium_episode_against_greedy():
 
 
 def test_mask_matches_engine(config):
-    loop = create_game(["A", "B", "C"], config, seed=2, max_turns=1000)
+    loop = create_game(
+        ["A", "B", "C"], config, seed=2, max_turns=1000,
+        trade_enabled=False, debt_resolution_enabled=False,
+    )
     space = DiscreteActionSpace(loop.game.board)
     rng = np.random.default_rng(2)
     for _ in range(2000):

@@ -18,7 +18,8 @@ def check_invariants(loop, config):
 
     houses = sum(p.houses for p in game.property_states.values() if p.houses < HOTEL_LEVEL)
     hotels = sum(1 for p in game.property_states.values() if p.houses == HOTEL_LEVEL)
-    assert game.houses_in_bank + houses == loop.rules.max_houses_in_bank
+    assert game.houses_in_bank + houses - game.house_shortage == loop.rules.max_houses_in_bank
+    assert game.houses_in_bank >= 0 and game.house_shortage >= 0
     assert game.hotels_in_bank + hotels == loop.rules.max_hotels_in_bank
 
     for prop in game.property_states.values():
@@ -57,7 +58,11 @@ def test_random_games_keep_invariants(config, num_players):
             result = loop.process_action(rng.choice(loop.legal_actions()))
             assert result["status"] == "SUCCESS", result
             check_invariants(loop, config)
-        assert loop.game.winner_id is not None or loop.game.truncated
+        assert (
+            loop.game.winner_id is not None
+            or loop.game.truncated
+            or not loop.game.active_player_ids
+        )
 
 
 def test_greedy_games(config):

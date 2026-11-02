@@ -20,6 +20,15 @@ from .transition_model import (
     TabularTransitionModel
 )
 
+from .stationary_board import (
+    LandingEventFrequency,
+    MonopolyBoardModel,
+    MonopolyMovementOutcome,
+    MonopolyMovementState,
+    StationaryBoardAnalysis,
+    calculate_stationary_board_analysis,
+)
+
 
 __all__ = [
     "calculate_expected_hitting_times",
@@ -28,5 +37,11 @@ __all__ = [
     "calculate_stationary_distribution",
     "TransitionMatrix",
     "TransitionModel",
-    "TabularTransitionModel"
+    "TabularTransitionModel",
+    "LandingEventFrequency",
+    "MonopolyBoardModel",
+    "MonopolyMovementOutcome",
+    "MonopolyMovementState",
+    "StationaryBoardAnalysis",
+    "calculate_stationary_board_analysis",
 ]

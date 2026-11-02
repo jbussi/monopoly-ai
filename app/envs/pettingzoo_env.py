@@ -80,6 +80,8 @@ class raw_env(AECEnv):
             seed=seed,
             max_turns=self.max_turns,
             auction_enabled=self.auction_enabled,
+            trade_enabled=False,  # monopoly_v1 keeps its fixed Discrete(124) action contract
+            debt_resolution_enabled=False,
             record_events=False,
         )
 

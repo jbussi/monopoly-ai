@@ -3,6 +3,14 @@ from .actions import (
     GameAction
 )
 
+from .auction import (
+    AuctionDecisionRecord,
+    AuctionParticipantSnapshot,
+    AuctionPropertySnapshot,
+    AuctionResultRecord,
+    AuctionSessionRecord,
+)
+
 from .base_controller import (
     BaseController
 )
@@ -40,6 +48,15 @@ from .game_state import (
     GameState
 )
 
+from .trade import (
+    TradeContextRecord,
+    TradeDecisionRecord,
+    TradeNegotiation,
+    TradeOffer,
+    TradePlayerContext,
+    TradePropertyContext,
+)
+
 from .pieces import (
     Piece
 )
@@ -56,6 +73,11 @@ from .rules import (
 
 __all__ = [
     "ActionType",
+    "AuctionDecisionRecord",
+    "AuctionParticipantSnapshot",
+    "AuctionPropertySnapshot",
+    "AuctionResultRecord",
+    "AuctionSessionRecord",
     "Debt",
     "ConfiguredRules",
     "GameAction",
@@ -74,6 +96,12 @@ __all__ = [
     "PieceState",
     "PropertyState",
     "GameState",
+    "TradeNegotiation",
+    "TradeOffer",
+    "TradeDecisionRecord",
+    "TradeContextRecord",
+    "TradePlayerContext",
+    "TradePropertyContext",
     "Piece",
     "Player",
     "Rules",

@@ -369,11 +369,13 @@ def _parse_settings(raw: dict[str, Any]) -> GameSettings:
         auction_enabled=boolean("auctionEnabled"),
         auction_min_bid=integer("auctionMinBid"),
         auction_timeout_seconds=integer("auctionTimeoutSeconds"),
-        free_parking_jackpot=boolean("freeParkingJackpot"),
         max_players=integer("maxPlayers"),
         min_players_to_start=integer("minPlayersToStart"),
         allow_spectators=boolean("allowSpectators"),
         trade_enabled=boolean("tradeEnabled"),
+        trade_max_counteroffers=integer("tradeMaxCounteroffers"),
+        debt_resolution_enabled=boolean("debtResolutionEnabled"),
+        debt_negotiations_per_player=integer("debtNegotiationsPerPlayer"),
         bankruptcy_to_bank=boolean("bankruptcyToBank"),
         player_colors=tuple(dict(color) for color in player_colors),
         player_tokens=tuple(player_tokens),
@@ -381,6 +383,10 @@ def _parse_settings(raw: dict[str, Any]) -> GameSettings:
 
 
 def _validate_settings(settings: GameSettings, board_size: int) -> None:
+    if settings.trade_max_counteroffers < 0:
+        raise ValueError("'tradeMaxCounteroffers' não pode ser negativo.")
+    if settings.debt_negotiations_per_player < 0:
+        raise ValueError("'debtNegotiationsPerPlayer' não pode ser negativo.")
     if settings.min_players_to_start < 2:
         raise ValueError("'minPlayersToStart' deve ser pelo menos 2.")
 
