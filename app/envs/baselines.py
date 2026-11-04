@@ -13,12 +13,19 @@ Para usar um modelo treinado como oponente:
 """
 
 import random
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from app.domain.game.actions import ActionType, GameAction
 from app.domain.game.game_loop import GameLoop
 
-Policy = Callable[[GameLoop], GameAction]
+if TYPE_CHECKING:
+    from app.domain.agents.protocols import Agent
+    Policy = Agent
+else:
+    # Preserve a lightweight runtime annotation and avoid importing analytics.
+    from collections.abc import Callable
+
+    Policy = Callable[[GameLoop], GameAction]
 
 
 class RandomPolicy:
@@ -28,6 +35,7 @@ class RandomPolicy:
         self.rng = random.Random(seed)
 
     def reset(self, seed: int | None = None) -> None:
+        """Seed this policy's random choices for a new episode."""
         self.rng.seed(seed)
 
     def __call__(self, loop: GameLoop) -> GameAction:

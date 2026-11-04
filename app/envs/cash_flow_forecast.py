@@ -50,6 +50,7 @@ class PropertyDecisionCashFlowForecast:
     bankruptcy_probability: np.ndarray
 
     def as_dict(self, money_scale: float) -> dict[str, Any]:
+        """Return model-ready arrays with monetary fields normalized."""
         return {
             "active": np.asarray([1.0], dtype=np.float32),
             "horizons": np.asarray(self.horizons, dtype=np.float32),
@@ -96,6 +97,7 @@ def forecast_property_cash_flows(
     *,
     horizons: tuple[int, ...] = FORECAST_HORIZONS,
     samples: int = DEFAULT_FORECAST_SAMPLES,
+    legal_actions: list[GameAction] | None = None,
 ) -> PropertyDecisionCashFlowForecast:
     """Compare buy-now with decline, simulating engine outcomes from this state.
 
@@ -117,7 +119,8 @@ def forecast_property_cash_flows(
         raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
 
     tile_id = loop.pending_tile_id
-    legal_types = {action.action_type for action in loop.legal_actions()}
+    available_actions = loop.legal_actions() if legal_actions is None else legal_actions
+    legal_types = {action.action_type for action in available_actions}
     option_available = (
         ActionType.BUY_PROPERTY in legal_types,
         ActionType.DECLINE_PROPERTY in legal_types,
@@ -181,20 +184,22 @@ def forecast_management_cash_flows(
     config: GameConfig,
     *,
     samples: int = DEFAULT_MANAGEMENT_FORECAST_SAMPLES,
+    legal_actions: list[GameAction] | None = None,
 ) -> dict[tuple[str, int], PropertyDecisionCashFlowForecast]:
     """Forecast each legal property-management action against deferring it once."""
     if loop.current_decision_player_id != focal_player_id:
         return {}
     if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
         raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
+    legal_actions = loop.legal_actions() if legal_actions is None else legal_actions
     candidates = [
-        action for action in loop.legal_actions()
+        action for action in legal_actions
         if action.action_type in MANAGEMENT_ACTION_TYPES
         and isinstance(action.payload.get("tile_id"), int)
     ]
     result: dict[tuple[str, int], PropertyDecisionCashFlowForecast] = {}
     for candidate in candidates:
-        deferred = _defer_management_action(loop, candidate)
+        deferred = _defer_management_action(loop, candidate, legal_actions)
         base_seed = _state_seed(loop, focal_player_id, candidate.payload["tile_id"])
         base_seed ^= int.from_bytes(candidate.action_type.encode("utf-8"), "little")
         paths_by_scenario: list[list[dict[str, np.ndarray]]] = [[], []]
@@ -225,6 +230,7 @@ def forecast_jail_decisions(
     config: GameConfig,
     *,
     samples: int = DEFAULT_FORECAST_SAMPLES,
+    legal_actions: list[GameAction] | None = None,
 ) -> dict[str, np.ndarray]:
     """Compare jail choices, cash trajectories, and future unowned-property chances."""
     if (
@@ -236,7 +242,8 @@ def forecast_jail_decisions(
     if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
         raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
 
-    legal_kinds = {action.action_type for action in loop.legal_actions()}
+    available_actions = loop.legal_actions() if legal_actions is None else legal_actions
+    legal_kinds = {action.action_type for action in available_actions}
     available = np.asarray([kind in legal_kinds for kind in JAIL_OPTIONS], dtype=bool)
     property_ids = tuple(
         tile.tile_id for tile in loop.game.board.property_tiles
@@ -306,8 +313,11 @@ def forecast_jail_decisions(
     return result
 
 
-def _defer_management_action(loop: GameLoop, candidate: GameAction) -> GameAction:
-    legal = loop.legal_actions()
+def _defer_management_action(
+    loop: GameLoop,
+    candidate: GameAction,
+    legal: list[GameAction],
+) -> GameAction:
     other_management = [
         action for action in legal
         if action.action_type in MANAGEMENT_ACTION_TYPES
@@ -360,6 +370,7 @@ def _simulate_branch(
     max_actions = max(horizons) * max(100, len(loop.game.turn_order) * 50)
 
     def record_property_opportunity() -> None:
+        """Record an unowned tracked tile offered to the forecast player."""
         if (
             tracked_property_ids
             and loop.current_decision_player_id == focal_player_id
@@ -370,6 +381,7 @@ def _simulate_branch(
             opportunity_seen.add(loop.pending_tile_id)
 
     def snapshot() -> dict[str, Any]:
+        """Capture forecast metrics for the current simulated horizon."""
         state = loop.game.player_states[focal_player_id]
         return {
             "cash_change": float(state.money - initial_cash),
@@ -434,6 +446,12 @@ def _simulate_branch(
         ):
             snapshots[horizons[next_horizon_index]] = snapshot()
             next_horizon_index += 1
+
+        # Every requested result is fixed once the last horizon is recorded.
+        # Continuing until the episode ends wastes hundreds of engine actions
+        # per Monte Carlo path and cannot change any forecast value.
+        if next_horizon_index == len(horizons):
+            break
 
     final = snapshot()
     for horizon in horizons:

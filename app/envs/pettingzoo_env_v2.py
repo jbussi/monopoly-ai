@@ -23,6 +23,7 @@ from app.infraestructure.game_config.models import GameConfig
 
 
 def env(**kwargs: Any) -> AECEnv:
+    """Build the PettingZoo v2 environment with standard API wrappers."""
     e = raw_env(**kwargs)
     e = wrappers.AssertOutOfBoundsWrapper(e)
     e = wrappers.OrderEnforcingWrapper(e)
@@ -86,9 +87,11 @@ class raw_env(AECEnv):
         )
 
     def action_space(self, agent: str) -> spaces.Space:
+        """Return the structured v2 action space for a seat."""
         return self.action_spaces[agent]
 
     def observation_space(self, agent: str) -> spaces.Space:
+        """Return the v2 observation space, including its action mask."""
         return self.observation_spaces[agent]
 
     def _player_id(self, agent: str):
@@ -98,6 +101,7 @@ class raw_env(AECEnv):
         return self.possible_agents[self.loop.game.turn_order.index(player_id)]
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
+        """Create a seeded game and reset all per-agent AEC state."""
         self.loop = self._new_game(seed)
         self.action_map = StructuredActionSpace(
             self.loop, self.max_players, loop_provider=lambda: self.loop
@@ -122,14 +126,20 @@ class raw_env(AECEnv):
         self.agent_selection = self._agent(self.loop.current_decision_player_id)
 
     def observe(self, agent: str) -> dict[str, Any]:
+        """Encode public state and legal actions for one player seat."""
         player_id = self._player_id(agent)
-        state = self.encoder.encode(self.loop, player_id)
-        if self.loop.game.game_over or self.loop.current_decision_player_id != player_id:
-            mask = self.action_map.action_mask(self.loop)
+        is_current_actor = (
+            not self.loop.game.game_over
+            and self.loop.current_decision_player_id == player_id
+        )
+        legal_actions = self.loop.legal_actions() if is_current_actor else []
+        state = self.encoder.encode(
+            self.loop, player_id, legal_actions=legal_actions
+        )
+        mask = self.action_map.action_mask(self.loop, legal_actions=legal_actions)
+        if not is_current_actor:
             for values in mask.values():
                 values.fill(0)
-        else:
-            mask = self.action_map.action_mask(self.loop)
         return {**state, "action_mask": mask}
 
     def action_mask(
@@ -207,6 +217,7 @@ class raw_env(AECEnv):
         )
 
     def step(self, action: dict[str, Any] | None) -> None:
+        """Apply a structured action and advance to the next decision maker."""
         agent = self.agent_selection
         if self.terminations[agent] or self.truncations[agent]:
             self._was_dead_step(action)
@@ -233,6 +244,7 @@ class raw_env(AECEnv):
             self.render()
 
     def render(self) -> str | None:
+        """Render the current game as text, printing in human mode."""
         text = render_text(self.loop)
         if self.render_mode == "human":
             print(text)
@@ -240,4 +252,5 @@ class raw_env(AECEnv):
         return text
 
     def close(self) -> None:
+        """Release environment resources; this adapter currently owns none."""
         return None

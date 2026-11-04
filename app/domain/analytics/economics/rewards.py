@@ -111,6 +111,7 @@ class RewardLedger:
         return tuple(self._rewards)
 
     def add(self, reward: Reward) -> None:
+        """Append one validated economic event without changing game cash."""
         if not isinstance(reward, Reward):
             raise TypeError("O registro deve ser uma instância de Reward.")
         self._rewards.append(reward)

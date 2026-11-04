@@ -88,6 +88,7 @@ class MonopolyGymEnv(gym.Env):
         )
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
+        """Start a seeded legacy-v1 episode and return its first observation."""
         super().reset(seed=seed)
         self.loop = self._new_game(int(self.np_random.integers(2**31)))
         order = self.loop.game.turn_order
@@ -103,6 +104,7 @@ class MonopolyGymEnv(gym.Env):
         return self._obs(), self._info()
 
     def step(self, action: int):
+        """Apply one discrete v1 action and advance fixed-policy opponents."""
         mask = self.action_masks()
         if not mask[int(action)]:
             if self.on_illegal == "terminate":
@@ -120,12 +122,14 @@ class MonopolyGymEnv(gym.Env):
         return self._obs(), reward, terminated, game.truncated, self._info()
 
     def action_masks(self) -> np.ndarray:
+        """Return the legal-action mask for the learner's current decision."""
         loop = self.loop
         if loop.game.game_over or loop.current_decision_player_id != self.learner_id:
             return np.zeros(self.action_space_map.size, dtype=bool)
         return self.action_space_map.mask(loop).astype(bool)
 
     def render(self) -> str | None:
+        """Render the current board as text, printing in human mode."""
         text = render_text(self.loop)
         if self.render_mode == "human":
             print(text)

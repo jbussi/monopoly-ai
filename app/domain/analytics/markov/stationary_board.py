@@ -69,6 +69,7 @@ class StationaryBoardAnalysis:
     expected_rolls_per_turn: float
 
     def probability_per_roll(self, tile_id: int) -> float:
+        """Return the long-run probability of landing on a tile per dice roll."""
         try:
             index = self.positions.index(tile_id)
         except ValueError as exc:
@@ -76,6 +77,7 @@ class StationaryBoardAnalysis:
         return self.landing_probabilities_per_roll[index]
 
     def arrivals_per_turn(self, tile_id: int) -> float:
+        """Return expected landings on a tile per complete table turn."""
         try:
             index = self.positions.index(tile_id)
         except ValueError as exc:
@@ -83,6 +85,7 @@ class StationaryBoardAnalysis:
         return self.expected_landings_per_turn[index]
 
     def rent_events_for(self, tile_id: int) -> tuple[LandingEventFrequency, ...]:
+        """List rent-relevant landing frequencies for a property tile."""
         return tuple(event for event in self.landing_events_per_turn if event.tile_id == tile_id)
 
 
@@ -167,6 +170,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         self,
         source: MonopolyMovementState,
     ) -> tuple[MonopolyMovementOutcome, ...]:
+        """Return dice and card outcomes reachable from a movement state."""
         self._validate_state(source)
         if source not in self._outcome_cache:
             self._outcome_cache[source] = self._calculate_outcomes(source)
@@ -176,6 +180,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         self,
         source: MonopolyMovementState,
     ) -> tuple[tuple[MonopolyMovementState, float], ...]:
+        """Aggregate outcome probabilities by resulting movement state."""
         self._validate_state(source)
         if source not in self._transition_cache:
             transitions: dict[MonopolyMovementState, float] = defaultdict(float)
@@ -189,6 +194,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         source: MonopolyMovementState,
         target: MonopolyMovementState,
     ) -> float:
+        """Return the one-roll transition probability between two states."""
         self._validate_state(target)
         return dict(self.transitions_from(source)).get(target, 0.0)
 

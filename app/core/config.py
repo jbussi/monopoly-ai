@@ -15,10 +15,12 @@ class AppSettings:
 
     @property
     def game_config_dir(self) -> Path:
+        """Return the directory containing the selected variant's JSON files."""
         return self.configs_dir / "games" / self.game_variant
 
 
 def get_app_settings() -> AppSettings:
+    """Resolve the project configuration paths and selected game variant."""
     variant = os.getenv("MONOPOLY_GAME_VARIANT", "classic_us")
 
     if not variant or Path(variant).name != variant:

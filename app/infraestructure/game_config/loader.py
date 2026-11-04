@@ -232,9 +232,11 @@ def _validate_card_data(
     context = f"Dados da carta {card_id!r}"
 
     def integer(key: str, *, minimum: int = 0) -> int:
+        """Read an integer field from the current card definition."""
         return _require_int(card_data, key, context, minimum=minimum)
 
     def optional_boolean(key: str) -> None:
+        """Validate a card boolean field when that optional field is present."""
         if key in card_data and not isinstance(card_data[key], bool):
             raise ValueError(f"{context}: '{key}' deve ser booleano.")
 
@@ -320,9 +322,11 @@ def _parse_cards(
 
 def _parse_settings(raw: dict[str, Any]) -> GameSettings:
     def integer(key: str) -> int:
+        """Read one required integer from ``settings.json``."""
         return _require_int(raw, key, "settings.json")
 
     def boolean(key: str) -> bool:
+        """Read and validate one required boolean from ``settings.json``."""
         value = raw.get(key)
 
         if not isinstance(value, bool):
@@ -422,6 +426,7 @@ def load_game_config(
     config_dir: Path,
     variant: str = "classic_us",
 ) -> GameConfig:
+    """Load, parse and validate JSON files for one game variant."""
     config_dir = Path(config_dir)
 
     raw_board = _read_json(config_dir / "board.json")

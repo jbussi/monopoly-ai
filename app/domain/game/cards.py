@@ -88,6 +88,7 @@ class StandardCardDeck(CardDeck):
 
     @property
     def remaining(self) -> int:
+        """Return how many cards remain in the draw pile."""
         return len(self._cards)
 
     @property
@@ -107,9 +108,11 @@ class StandardCardDeck(CardDeck):
 
     @property
     def discarded(self) -> int:
+        """Return how many cards are currently in the discard pile."""
         return len(self._discard_pile)
 
     def draw(self) -> CardLike:
+        """Draw the next card, recycling and shuffling discards when configured."""
         if not self._cards:
             if not self._recycle_discard or not self._discard_pile:
                 raise LookupError("Não há cartas disponíveis para compra.")
@@ -121,7 +124,9 @@ class StandardCardDeck(CardDeck):
         return self._cards.pop(0)
 
     def return_card(self, card: CardLike) -> None:
+        """Place a used card in the discard pile."""
         self._discard_pile.append(card)
 
     def shuffle(self) -> None:
+        """Shuffle the current draw pile with the deck's seeded generator."""
         self._rng.shuffle(self._cards)

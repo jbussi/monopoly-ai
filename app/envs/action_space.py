@@ -42,7 +42,10 @@ PROPERTY_OFFSET = BID_OFFSET + len(AUCTION_BID_INCREMENTS)
 
 
 class DiscreteActionSpace:
+    """Encode legacy-v1 actions as stable integer indices."""
+
     def __init__(self, board: Board) -> None:
+        """Build the index layout from the board's ordered properties."""
         self.tile_ids = tuple(tile.tile_id for tile in board.property_tiles)
         self.num_properties = len(self.tile_ids)
         self._prop_index = {tile_id: i for i, tile_id in enumerate(self.tile_ids)}
@@ -80,6 +83,7 @@ class DiscreteActionSpace:
         return [PROPERTY_OFFSET + block * self.num_properties + self._prop_index[action.payload["tile_id"]]]
 
     def mask(self, loop: GameLoop) -> np.ndarray:
+        """Return a binary vector marking actions legal in the current state."""
         mask = np.zeros(self.size, dtype=np.int8)
         for action in loop.legal_actions():
             mask[self.to_index(action, loop)] = 1

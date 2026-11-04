@@ -86,9 +86,11 @@ class raw_env(AECEnv):
         )
 
     def observation_space(self, agent: str) -> spaces.Space:
+        """Return the fixed v1 observation space for a PettingZoo seat."""
         return self.observation_spaces[agent]
 
     def action_space(self, agent: str) -> spaces.Space:
+        """Return the discrete v1 action space for a PettingZoo seat."""
         return self.action_spaces[agent]
 
     def _player_id(self, agent: str):
@@ -98,6 +100,7 @@ class raw_env(AECEnv):
         return self.possible_agents[self.loop.game.turn_order.index(player_id)]
 
     def observe(self, agent: str) -> dict[str, np.ndarray]:
+        """Return the seat-relative state vector and legal-action mask."""
         player_id = self._player_id(agent)
         loop = self.loop
         if loop.game.game_over or loop.current_decision_player_id != player_id:
@@ -107,6 +110,7 @@ class raw_env(AECEnv):
         return {"observation": self.encoder.encode(loop, player_id), "action_mask": mask}
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
+        """Create a seeded game and initialize PettingZoo episode state."""
         self.loop = self._new_game(seed)
         self.agents = list(self.possible_agents)
         self.rewards = {a: 0.0 for a in self.agents}
@@ -117,6 +121,7 @@ class raw_env(AECEnv):
         self.agent_selection = self._agent(self.loop.current_decision_player_id)
 
     def step(self, action: int | None) -> None:
+        """Apply the selected seat's action and update AEC rewards and turns."""
         agent = self.agent_selection
         if self.terminations[agent] or self.truncations[agent]:
             self._was_dead_step(action)
@@ -145,6 +150,7 @@ class raw_env(AECEnv):
             self.render()
 
     def render(self) -> str | None:
+        """Render the current game as text, printing in human mode."""
         text = render_text(self.loop)
         if self.render_mode == "human":
             print(text)
@@ -152,4 +158,5 @@ class raw_env(AECEnv):
         return text
 
     def close(self) -> None:
+        """Release environment resources; this adapter currently owns none."""
         pass

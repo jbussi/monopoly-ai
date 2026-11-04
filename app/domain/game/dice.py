@@ -13,10 +13,12 @@ class DiceRoll:
 
     @property
     def total(self) -> int:
+        """Return the sum of the two dice."""
         return self.die1 + self.die2
 
     @property
     def is_double(self) -> bool:
+        """Return whether both dice show the same value."""
         return self.die1 == self.die2
 
 
@@ -59,9 +61,11 @@ class StandardDice(DiceMechanism):
 
     @property
     def sides(self) -> tuple[int, int]:
+        """Return the number of faces configured for each die."""
         return self._sides
 
     def roll(self) -> DiceRoll:
+        """Roll both dice using this mechanism's private random generator."""
         die1 = self._rng.randint(1, self._sides[0])
         die2 = self._rng.randint(1, self._sides[1])
 

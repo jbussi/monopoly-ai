@@ -18,6 +18,7 @@ class TransitionModel(ABC, Generic[State]):
 
     @property
     def state_space(self) -> StateSpace[State]:
+        """Return the finite states represented by this transition model."""
         return self._state_space
 
     @abstractmethod

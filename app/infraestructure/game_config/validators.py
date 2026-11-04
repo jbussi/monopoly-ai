@@ -4,6 +4,7 @@ from typing import Any
 
 
 def validate_board(data: Any) -> None:
+    """Check that raw board configuration is a nonempty list of objects."""
     if not isinstance(data, list) or not data:
         raise ValueError("O tabuleiro deve ser uma lista não vazia.")
 
@@ -15,11 +16,13 @@ def validate_board(data: Any) -> None:
 
 
 def validate_cards(data: Any) -> None:
+    """Check that raw card configuration is a nonempty JSON object."""
     if not isinstance(data, dict) or not data:
         raise ValueError("O arquivo de cartas deve conter um objeto JSON.")
 
 
 def validate_settings(data: Any) -> None:
+    """Check that raw game settings are a nonempty JSON object."""
     if not isinstance(data, dict) or not data:
         raise ValueError(
             "O arquivo de configurações deve conter um objeto JSON."

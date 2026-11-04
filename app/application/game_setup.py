@@ -32,6 +32,7 @@ from app.infraestructure.game_config.models import (
 
 
 def load_selected_game() -> GameConfig:
+    """Load the variant selected by ``MONOPOLY_GAME_VARIANT``."""
     settings = get_app_settings()
 
     return load_game_config(
@@ -109,6 +110,7 @@ def build_rules(settings: GameSettings, max_turns: int | None = None,
                 auction_enabled: bool | None = None,
                 trade_enabled: bool | None = None,
                 debt_resolution_enabled: bool | None = None) -> ConfiguredRules:
+    """Build runtime rules, applying optional overrides to JSON settings."""
     return ConfiguredRules(
         starting_money_value=settings.starting_money,
         go_salary_value=settings.go_salary,

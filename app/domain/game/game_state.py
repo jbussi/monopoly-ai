@@ -155,10 +155,12 @@ class GameState:
 
     @property
     def current_player(self) -> Player:
+        """Return the player whose turn currently owns the game flow."""
         return self.players[self.current_player_id]
 
     @property
     def active_player_ids(self) -> list[UUID]:
+        """List non-bankrupt players in configured turn order."""
         return [
             player_id
             for player_id in self.turn_order
@@ -166,9 +168,11 @@ class GameState:
         ]
 
     def seat_of(self, player_id: UUID) -> int:
+        """Return a player's absolute seat index in ``turn_order``."""
         return self.turn_order.index(player_id)
 
     def get_player_state(self, player_id: UUID) -> PlayerState:
+        """Look up mutable game state for a player identifier."""
         try:
             return self.player_states[player_id]
         except KeyError as exc:
@@ -177,6 +181,7 @@ class GameState:
             ) from exc
 
     def get_piece_state(self, piece_id: UUID) -> PieceState:
+        """Look up mutable board-position state for a piece identifier."""
         try:
             return self.piece_states[piece_id]
         except KeyError as exc:
@@ -185,6 +190,7 @@ class GameState:
             ) from exc
 
     def get_property_state(self, tile_id: int) -> PropertyState:
+        """Look up ownership, construction and mortgage state for a tile."""
         try:
             return self.property_states[tile_id]
         except KeyError as exc:
@@ -193,14 +199,17 @@ class GameState:
             ) from exc
 
     def position_of(self, player_id: UUID) -> int:
+        """Return the board position of the piece controlled by a player."""
         return self.piece_states[self._piece_of_player[player_id]].position
 
     def set_position(self, player_id: UUID, position: int) -> None:
+        """Place a player's piece without resolving the destination tile."""
         self.piece_states[self._piece_of_player[player_id]].position = position
 
     # ----------------------------------------------------------- propriedades
 
     def owned_tiles(self, player_id: UUID) -> list[PropertyTile]:
+        """List all purchasable tiles currently owned by the player."""
         return [
             tile
             for tile in self.board.property_tiles
@@ -208,12 +217,14 @@ class GameState:
         ]
 
     def owns_group(self, player_id: UUID, group: str) -> bool:
+        """Check whether the player owns every property in a group."""
         return all(
             self.property_states[tile.tile_id].owner_id == player_id
             for tile in self.board.group_members(group)
         )
 
     def amount_owed(self, player_id: UUID) -> int:
+        """Sum the player's outstanding debt ledger entries."""
         return sum(debt.amount for debt in self.debts if debt.debtor_id == player_id)
 
     def return_houses_to_bank(self, count: int) -> None:
