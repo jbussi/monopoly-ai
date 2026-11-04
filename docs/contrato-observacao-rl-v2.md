@@ -13,6 +13,28 @@ decisão pendente; dados já lançados; dívidas, negociações, leilões e tran
 de hipoteca; recursos do banco; características do tabuleiro; e as regras
 configuradas para a partida.
 
+## Campos no nível superior
+
+A observação mantém uma forma fixa e agrupa os dados por assunto. Use os
+indicadores de disponibilidade dos blocos condicionais; arrays zerados podem
+significar que aquela análise não se aplica ao estado atual.
+
+| Campo | Conteúdo |
+|---|---|
+| `players`, `properties`, `board_features`, `phase`, `pending_tile` | Jogadores em assentos relativos, imóveis, definições do tabuleiro e fase/decisão pendente. |
+| `auction`, `debts`, `debt_resolution`, `mortgage_transfer` | Lances, dívidas em ordem, progresso de insolvência e escolha hipotecária pendente. |
+| `pending_trade`, `trade_history` | Termos da oferta ativa e histórico público de ofertas e respostas. |
+| `globals`, `dice` | Estoque do banco, turno e dados configurados/lançados. |
+| `rules`, `rules_complete` | Regras legadas e parâmetros nomeados completos. Prefira `rules_complete`. |
+| `deck_card_counts` | Composição agregada das pilhas, sem revelar a ordem futura. |
+| `jail_forecast`, `jail_decision_forecast` | Estimativas do modelo de movimento e previsões condicionais das opções da prisão. |
+| `stationary_economics`, `property_decision_valuation` | Frequências estacionárias e valuation estrutural da aquisição de imóveis. |
+| `cash_flow_forecast`, `management_decision_valuation`, `management_cash_forecast` | Fluxos de caixa e avaliação das decisões de compra, construção, venda e hipoteca. |
+| `action_mask` | Tipos, opções, limites numéricos e condições de legalidade da ação atual. |
+
+Para definições de unidades, eixos e premissas das avaliações econômicas, veja
+[contratos de ambiente e regras](ambiente.md).
+
 `board_features` usa uma linha por casa na ordem do tabuleiro. Suas colunas
 iniciais mantêm o layout já existente para tipo de casa, valores e aluguéis;
 depois vêm os indicadores one-hot dos grupos de propriedades e dos tipos de
@@ -65,23 +87,17 @@ características econômicas dessas casas em `board_features` e a composição
 pública dos baralhos em `deck_card_counts`.
 
 O retorno esperado de voltar a circular é uma estimativa derivada, não um fato
-do estado. A previsão inicial está em `jail_forecast` e cobre 1, 3 e 5 turnos
-próprios, comparando tentar duplas, pagar a multa e usar uma carta. O número de
-amostras inicial é 64; as mesmas sementes por cenário permitem comparações mais
-estáveis. O padrão das linhas de `jail_forecast` é `try_doubles`, `pay_fine`, `use_jail_card`;
-as colunas de horizonte seguem a ordem 1, 3 e 5.
+do estado. `jail_forecast` compara tentar duplas, pagar a multa e usar uma carta,
+nessa ordem, nos horizontes próprios de 1, 3 e 5 turnos. `jail_decision_forecast`
+simula essas opções usando o motor completo; consulte os campos `horizons`,
+`option_available` e `sample_count` na própria observação para saber quais
+horizontes e ações estão disponíveis e quantas simulações foram feitas.
 
-`jail_forecast` inclui variação e média de caixa, dívida, probabilidade de ainda
-estar preso, aluguéis e impostos cobrados, salário de saída, oportunidades de
-compra por imóvel, cartas de prisão restantes e distribuição da posição final.
-Valores monetários seguem a escala da observação. A previsão não soma esses
-resultados em um escore nem recomenda uma ação.
-
-Limites desta primeira versão: após a decisão inicial, um jogador que voltar à
-prisão tenta duplas nos turnos seguintes; imóveis livres são recusados e os
-leilões ficam sem lances; os outros jogadores não avançam nem tomam decisões;
-uma dívida não resolvida interrompe a trajetória. As posições e ativos atuais
-dos oponentes permanecem no cálculo dos efeitos de aluguel. Cartas são
-amostradas a partir da composição pública, sem usar a ordem escondida do motor.
-Essas hipóteses serão refinadas com o tempo. As estimativas descrevem trajetórias
-condicionais, não o lucro final esperado da partida.
+`jail_forecast` informa métricas do movimento e da oportunidade de circular,
+incluindo posição, caixa, dívidas, aluguel/impostos cobrados e imóveis livres
+encontrados. `jail_decision_forecast` acrescenta distribuição de caixa,
+probabilidades de dívida e falência, chance de ainda estar preso, cartas
+restantes e oportunidades condicionais por propriedade. As previsões usam as
+políticas e a aleatoriedade controlada descritas no
+[guia de ambiente](ambiente.md). Elas descrevem cenários condicionais e não
+somam métricas em uma recomendação ou no lucro final esperado da partida.
