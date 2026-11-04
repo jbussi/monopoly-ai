@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import Protocol
 
 from app.domain.analytics.decision_features import EncodedDecisionContext
 from app.domain.game.actions import GameAction
 from app.domain.game.game_loop import GameLoop
+from app.domain.agents.trade_candidates import LegalCandidateProvider
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,50 @@ class CandidateSelector(Protocol):
         loop: GameLoop,
         candidates: Sequence[FeatureCandidate],
     ) -> GameAction: ...
+
+
+class CandidateScorer(Protocol):
+    """Returns a scalar preference score; larger values are preferred."""
+
+    def __call__(self, loop: GameLoop, candidate: FeatureCandidate) -> float: ...
+
+
+class MaxScoreSelector:
+    """Select the highest-scored legal candidate without defining strategy.
+
+    The supplied scorer owns all strategic preferences and may use the action,
+    encoded decision features, and full analytical context. Ties keep the first
+    candidate, making selection deterministic for a fixed candidate ordering.
+    """
+
+    def __init__(self, scorer: CandidateScorer) -> None:
+        if not callable(scorer):
+            raise TypeError("scorer deve ser chamável.")
+        self.scorer = scorer
+
+    def __call__(
+        self,
+        loop: GameLoop,
+        candidates: Sequence[FeatureCandidate],
+    ) -> GameAction:
+        if not candidates:
+            raise ValueError("É necessário ao menos um candidato para selecionar.")
+        scored = []
+        for candidate in candidates:
+            score = self.scorer(loop, candidate)
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                raise TypeError("O scorer deve retornar um número real.")
+            score = float(score)
+            if not isfinite(score):
+                raise ValueError("O scorer deve retornar um valor finito.")
+            scored.append((score, candidate.action))
+        return max(scored, key=lambda item: item[0])[1]
+
+    def reset(self, seed: int | None = None) -> None:
+        """Forward an episode seed to the wrapped scorer when supported."""
+        reset = getattr(self.scorer, "reset", None)
+        if callable(reset):
+            reset(seed)
 
 
 class FeaturePolicy:
@@ -58,7 +104,7 @@ class FeaturePolicy:
             raise ValueError("max_candidates deve ser um inteiro positivo.")
         self.evaluator = evaluator
         self.selector = selector
-        self.candidate_provider = candidate_provider or self._legal_candidates
+        self.candidate_provider = candidate_provider or LegalCandidateProvider(max_candidates)
         self.max_candidates = max_candidates
 
     def __call__(self, loop: GameLoop) -> GameAction:
@@ -105,13 +151,3 @@ class FeaturePolicy:
             reset = getattr(component, "reset", None)
             if callable(reset):
                 reset(seed)
-
-    @staticmethod
-    def _legal_candidates(loop: GameLoop) -> tuple[GameAction, ...]:
-        actions = list(loop.legal_actions())
-        if loop.game.pending_trade is not None:
-            actions.extend(
-                action for action in loop.trade_response_actions()
-                if loop.validate(action) is None
-            )
-        return tuple(actions)

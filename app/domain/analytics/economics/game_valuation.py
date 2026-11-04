@@ -50,6 +50,7 @@ class PortfolioScenarioValuation:
     horizons: tuple[PortfolioHorizonValue, ...]
 
     def for_rounds(self, rounds: int) -> PortfolioHorizonValue:
+        """Return the valuation entry calculated for the given horizon."""
         for value in self.horizons:
             if value.horizon_rounds == rounds:
                 return value

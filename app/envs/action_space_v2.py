@@ -53,6 +53,7 @@ class StructuredActionDict(spaces.Dict):
         self._legal_sampler = sampler
 
     def sample(self, mask=None, probability=None):
+        """Sample a currently legal engine action for checker compatibility."""
         # PettingZoo's AEC checker calls action_space.sample(observation_mask).
         # The v2 mask is conditional and has numeric bounds, so it is not the same
         # shape as this Dict. Sampling a legal engine action is both safe and valid.
@@ -144,6 +145,7 @@ class StructuredActionSpace:
         return bits
 
     def to_game_action(self, action: Mapping[str, Any], loop: GameLoop) -> GameAction:
+        """Decode a fixed-shape action dictionary into a domain action."""
         if not self.action_space.contains(action):
             raise ValueError("A ação não corresponde ao formato e aos tipos do espaço estruturado v2.")
         kind_index = _scalar(action["action_type"])
@@ -192,6 +194,7 @@ class StructuredActionSpace:
         return GameAction(kind, payload)
 
     def from_game_action(self, game_action: GameAction, loop: GameLoop) -> dict[str, np.ndarray | int]:
+        """Encode a domain action as fields in this structured action space."""
         action = self.empty_action()
         action["action_type"] = ACTION_TYPE_TO_INDEX[game_action.action_type]
         if "tile_id" in game_action.payload:
@@ -216,6 +219,7 @@ class StructuredActionSpace:
         return action
 
     def empty_action(self) -> dict[str, Any]:
+        """Return an action dictionary with valid shapes and unused sentinels."""
         return {
             "action_type": 0,
             "target_player": self.max_players,
@@ -230,6 +234,7 @@ class StructuredActionSpace:
         }
 
     def _sample_legal_action(self, rng) -> dict[str, Any]:
+        """Sample and encode one action the engine currently accepts."""
         loop = self._loop_provider()
         if loop.game.pending_trade is not None:
             # The counteroffer action requires terms; accept/reject are complete
@@ -251,15 +256,18 @@ class StructuredActionSpace:
         self,
         loop: GameLoop,
         *,
+        legal_actions: list[GameAction] | None = None,
         action_type: str | int | None = None,
         target_player_index: int | None = None,
         money_offered: int | None = None,
         money_requested: int | None = None,
     ) -> dict[str, np.ndarray]:
-        """Return legality masks and inclusive integer bounds for the selected branch.
+        """Describe legal action types, choices, item bits and numeric bounds.
 
-        ``action_type`` and ``target_player_index`` let an autoregressive policy
-        request masks after it has selected earlier fields of the action.
+        Optional branch values narrow the masks for autoregressive action
+        generation. ``action_type`` and ``target_player_index`` let a policy
+        request masks after earlier fields are selected. The engine performs
+        final validation when the action runs.
         """
         mask = {
             "action_type": np.zeros(len(ACTION_TYPES), dtype=np.int8),
@@ -281,7 +289,7 @@ class StructuredActionSpace:
             except KeyError as exc:
                 raise ValueError(f"Tipo de ação fora do espaço v2: {action_type}.") from exc
         actor = loop.current_decision_player_id
-        legal = loop.legal_actions()
+        legal = loop.legal_actions() if legal_actions is None else legal_actions
         for game_action in legal:
             kind = game_action.action_type
             mask["action_type"][ACTION_TYPE_TO_INDEX[kind]] = 1

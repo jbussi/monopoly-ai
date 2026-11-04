@@ -1,11 +1,13 @@
-# Ambiente de RL `monopoly_v1`
+# Contratos dos ambientes e regras do motor
 
-Este documento é o **contrato** entre a engine (`app/domain/game`) e o código de treino.
-Dentro da v1, tudo o que está aqui é estável. Mudar um tamanho ou uma ordem invalida
-modelos treinados e exige uma v2 (ver [Versionamento](#versionamento)).
+Este documento descreve o motor e os contratos dos ambientes `monopoly_v1` e
+`monopoly_v2`. Use a [arquitetura do projeto](arquitetura.md) para navegar entre
+os pacotes, o [contrato de agente](contrato-agente-rl-v1.md) para integrar uma
+política e o [contrato de observação](contrato-observacao-rl-v2.md) para
+entender os campos do ambiente v2.
 
-O motor aceita partidas com 2 a 12 jogadores. Os adaptadores RL desta versão usam uma
-observação com quatro assentos e, portanto, aceitam partidas com 2 a 4 jogadores.
+O motor aceita partidas com 2 a 12 jogadores. Os adaptadores legados v1 têm uma
+observação fixa para até quatro jogadores; os ambientes v2 aceitam de 2 a 12.
 
 ## Camadas
 
@@ -15,10 +17,11 @@ app/infraestructure/game_config  lê e valida os JSONs        -> GameConfig
 app/application/game_setup       monta a partida              -> create_game(...) -> GameLoop
 app/domain/game                  regras (GameLoop, GameState): ações em texto, sem IA
 app/envs                         adaptadores: espaço discreto, observação, PettingZoo, Gymnasium, texto
-agents/                          reservado a agentes treináveis da v2
+app/domain/agents                protocolos e adaptadores de políticas
+agents/                          guia do estado dos agentes e do treino
 ```
 
-A engine de domínio não depende de Gymnasium nem PettingZoo. A API dela é
+A engine de domínio não depende de Gymnasium nem PettingZoo. Sua interface é
 `GameLoop.process_action(GameAction)`, `legal_actions()` e `validate(action)`, as mesmas
 que uma API web ou um humano usariam. As duas primeiras usam a mesma validação, então a
 máscara de ações corresponde às ações aceitas (há teste para isso).
@@ -68,14 +71,16 @@ num leilão é quem tem a vez de dar lance; numa dívida, é o devedor (ex.: car
 | `AWAITING_PROPERTY_DECISION` | `BUY_PROPERTY` (se tiver dinheiro), `DECLINE_PROPERTY`; gerenciamento |
 | `AUCTION` | `AUCTION_BID {amount}`, `AUCTION_WITHDRAW` |
 | `AFTER_ROLL` | `END_TURN`; gerenciamento |
-| `RESOLVE_DEBT` | `SELL_HOUSE`, `MORTGAGE`; a falência pode ocorrer automaticamente quando a liquidação estimada não cobre a dívida |
+| `RESOLVE_DEBT` | `SELL_HOUSE`, `MORTGAGE`, `PROPOSE_TRADE`/respostas, `END_DEBT_NEGOTIATIONS`, `AUCTION_DEBT_PROPERTY`, `DECLARE_BANKRUPTCY` |
 | `RESOLVE_MORTGAGE_TRANSFER` | O recebedor escolhe manter a hipoteca pagando 10% ou resgatá-la imediatamente pelo `unmortgageCost` |
 | `GAME_OVER` | nenhuma |
 
 "Gerenciamento" = `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE` e `UNMORTGAGE`, todas com `{tile_id}`.
-Um turno tem várias decisões do mesmo agente. Uma dívida é paga automaticamente assim que
-o devedor tem dinheiro suficiente; caso contrário, pode vender construções ou hipotecar
-imóveis. Se o valor estimado de liquidação não cobrir a dívida, a falência é imediata.
+Um turno pode conter várias decisões do mesmo agente. Quando o caixa cobre a dívida,
+ela é paga automaticamente. Caso contrário, o fluxo permite vender construções,
+hipotecar imóveis, negociar com credores dentro dos limites configurados e, após
+encerrar negociações, leiloar propriedades sem construções. A falência é declarada
+quando as opções permitidas de recuperação se esgotam.
 
 ### Negociações no motor
 
@@ -204,9 +209,13 @@ O ambiente legado se chama `monopoly_v1` (`app.envs.ENV_VERSION`). O contrato es
 completo se chama `monopoly_v2` (`app.envs.ENV_VERSION_V2`). Mudanças futuras que afetem
 espaço de ações ou observações devem seguir estas regras:
 
-1. Blocos de ação novos só são **acrescentados no final**.
-2. Campos novos de observação entram **no final** do vetor.
-3. Regras novas ficam atrás de flags (`settings.json` / `Rules`), e a v1 continua disponível.
+1. No contrato discreto v1, novos blocos de ação só são acrescentados ao final;
+   não se reordenam nem se reaproveitam índices publicados.
+2. Na observação vetorial v1, novos campos só são acrescentados ao final. Na v2,
+   campos são nomeados e devem manter semântica e forma; adições são feitas como
+   chaves novas ou mudanças versionadas do espaço.
+3. Regras que alteram partidas são configuradas em `settings.json` e modeladas
+   em `Rules`; o adaptador v1 permanece disponível para consumidores antigos.
 
 ## Ambiente v2: regras completas e ações estruturadas
 
@@ -221,10 +230,13 @@ pendente, ledger ordenado de dívidas, progresso da insolvência, oferta pendent
 incluindo `house_shortage`. Slots de jogadores são relativos ao observador: slot 0 é o
 próprio jogador. As cartas de prisão, propriedades oferecidas e participantes de leilão
 também são visíveis; a ordem oculta dos baralhos continua privada.
-Quando o agente atual está preso, `jail_forecast` oferece previsões Monte Carlo para
-1, 3 e 5 turnos próprios, comparando tentar duplas, pagar a multa e usar uma carta.
-O contrato detalhado e as hipóteses desta primeira versão estão em
+Quando o agente atual está preso, `jail_forecast` apresenta estimativas do modelo
+de movimento e caixa; `jail_decision_forecast` simula opções de saída usando o motor
+e políticas de continuação. O contrato detalhado e as hipóteses estão em
 [`contrato-observacao-rl-v2.md`](contrato-observacao-rl-v2.md).
+O contrato versionado da interface de agente, incluindo ciclo de passos,
+recompensa, truncagem, ações estruturadas e reprodutibilidade, está em
+[`contrato-agente-rl-v1.md`](contrato-agente-rl-v1.md).
 
 O campo `stationary_economics` acrescenta tráfego estacionário por propriedade e cenários
 comparáveis de investimento. `property_arrivals_per_roll` é a taxa de chegada por

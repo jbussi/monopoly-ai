@@ -8,7 +8,7 @@ import numpy as np
 from gymnasium import spaces
 
 from app.domain.game.board import PropertyKind, PropertyTile, SpecialTile, TaxTile
-from app.domain.game.actions import ActionType
+from app.domain.game.actions import ActionType, GameAction
 from app.domain.game.game_loop import GameLoop, MORTGAGE_TRANSFER_INTEREST_PERCENT
 from app.domain.game.game_state import HOTEL_LEVEL
 from app.domain.analytics.decisions.jail_forecast import (
@@ -342,13 +342,22 @@ class ObservationEncoderV2:
             }),
         })
 
-    def encode(self, loop: GameLoop, observer: UUID) -> dict:
+    def encode(
+        self,
+        loop: GameLoop,
+        observer: UUID,
+        *,
+        legal_actions: list[GameAction] | None = None,
+    ) -> dict:
+        """Encode public state and decision analytics for one player seat."""
         game = loop.game
         order = game.turn_order
         observer_seat = order.index(observer)
         relative_ids = [order[(observer_seat + offset) % len(order)] for offset in range(len(order))]
         relative_slot = {player_id: offset for offset, player_id in enumerate(relative_ids)}
         actor = loop.current_decision_player_id
+        if legal_actions is None:
+            legal_actions = loop.legal_actions() if actor == observer else []
 
         players = {
             "active": np.zeros(self.max_players, dtype=np.float32),
@@ -569,13 +578,21 @@ class ObservationEncoderV2:
             "mortgage_transfer": mortgage_transfer,
             "stationary_economics": self._stationary_economics(loop),
             "property_decision_valuation": self._property_decision_valuation(loop, observer),
-            "management_decision_valuation": self._management_decision_valuation(loop, observer),
-            "management_cash_forecast": self._management_cash_forecast(loop, observer),
-            "cash_flow_forecast": self._cash_flow_forecast(loop, observer),
-            "jail_decision_forecast": self._jail_decision_forecast(loop, observer),
+            "management_decision_valuation": self._management_decision_valuation(
+                loop, observer, legal_actions
+            ),
+            "management_cash_forecast": self._management_cash_forecast(
+                loop, observer, legal_actions
+            ),
+            "cash_flow_forecast": self._cash_flow_forecast(loop, observer, legal_actions),
+            "jail_decision_forecast": self._jail_decision_forecast(
+                loop, observer, legal_actions
+            ),
         }
 
-    def _jail_decision_forecast(self, loop: GameLoop, observer: UUID) -> dict:
+    def _jail_decision_forecast(
+        self, loop: GameLoop, observer: UUID, legal_actions: list[GameAction]
+    ) -> dict:
         option_count = len(JAIL_OPTIONS)
         horizon_count = len(FORECAST_HORIZONS)
         stat_count = len(FORECAST_STAT_NAMES)
@@ -611,7 +628,9 @@ class ObservationEncoderV2:
         ):
             return result
 
-        forecast = forecast_jail_cash_flows(loop, observer, self.config)
+        forecast = forecast_jail_cash_flows(
+            loop, observer, self.config, legal_actions=legal_actions
+        )
         result["active"][:] = forecast["active"]
         result["option_available"][:] = forecast["option_available"]
         result["sample_count"][:] = forecast["sample_count"]
@@ -733,7 +752,9 @@ class ObservationEncoderV2:
             result["payback_available"][0] = 1.0
         return result
 
-    def _cash_flow_forecast(self, loop: GameLoop, observer: UUID) -> dict:
+    def _cash_flow_forecast(
+        self, loop: GameLoop, observer: UUID, legal_actions: list[GameAction]
+    ) -> dict:
         if (
             loop.turn_phase != GameLoop.AWAITING_PROPERTY_DECISION
             or loop.current_decision_player_id != observer
@@ -745,10 +766,13 @@ class ObservationEncoderV2:
             self.config,
             horizons=FORECAST_HORIZONS,
             samples=DEFAULT_FORECAST_SAMPLES,
+            legal_actions=legal_actions,
         )
         return forecast.as_dict(self.money_scale)
 
-    def _management_decision_valuation(self, loop: GameLoop, observer: UUID) -> dict:
+    def _management_decision_valuation(
+        self, loop: GameLoop, observer: UUID, legal_actions: list[GameAction]
+    ) -> dict:
         shape = (len(MANAGEMENT_ACTION_TYPES), len(self.tile_ids))
         result = {
             "available": np.zeros(shape, dtype=np.float32),
@@ -762,7 +786,7 @@ class ObservationEncoderV2:
             return result
         action_index = {kind: index for index, kind in enumerate(MANAGEMENT_ACTION_TYPES)}
         candidates = [
-            action for action in loop.legal_actions()
+            action for action in legal_actions
             if action.action_type in action_index and "tile_id" in action.payload
         ]
         for action in candidates:
@@ -822,7 +846,9 @@ class ObservationEncoderV2:
                 )
         return result
 
-    def _management_cash_forecast(self, loop: GameLoop, observer: UUID) -> dict:
+    def _management_cash_forecast(
+        self, loop: GameLoop, observer: UUID, legal_actions: list[GameAction]
+    ) -> dict:
         action_count = len(MANAGEMENT_ACTION_TYPES)
         property_count = len(self.tile_ids)
         horizon_count = len(FORECAST_HORIZONS)
@@ -852,6 +878,7 @@ class ObservationEncoderV2:
             observer,
             self.config,
             samples=DEFAULT_MANAGEMENT_FORECAST_SAMPLES,
+            legal_actions=legal_actions,
         )
         action_index = {kind: index for index, kind in enumerate(MANAGEMENT_ACTION_TYPES)}
         for (kind, tile_id), forecast in forecasts.items():

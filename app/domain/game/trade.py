@@ -78,6 +78,7 @@ def payload_to_offer(
     recipient_id: UUID,
     counteroffer_number: int = 0,
 ) -> TradeOffer:
+    """Parse and validate structured terms into an immutable trade offer."""
     money_offered = payload.get("money_offered", 0)
     money_requested = payload.get("money_requested", 0)
     if any(
@@ -87,6 +88,7 @@ def payload_to_offer(
         raise ValueError("Os valores em dinheiro devem ser inteiros não negativos.")
 
     def ids(key: str, value_type: type) -> tuple:
+        """Read one item list and reject invalid or repeated identifiers."""
         values = payload.get(key, ())
         if not isinstance(values, (list, tuple)):
             raise ValueError(f"'{key}' deve ser uma lista.")

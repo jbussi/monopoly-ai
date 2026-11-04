@@ -1,76 +1,45 @@
-# Escopo e preparação da release v1
+# Histórico da release v1.0.0
 
-Este documento descreve o escopo funcional da primeira versão do Monopoly AI. `monopoly_v1`
-é o identificador do contrato dos ambientes de RL; a versão do pacote Python continua em
-`0.1.0` no `pyproject.toml`. Esta documentação prepara o projeto para uma release, mas não
-publica nem cria uma tag.
+Este documento registra o escopo publicado como v1.0.0. Ele é um registro
+histórico: o projeto evoluiu depois dessa release. Para entender o estado
+presente, comece pela [arquitetura](arquitetura.md) e pelo
+[contrato atual dos ambientes](ambiente.md).
 
-## Incluído na v1
+## Escopo da v1.0.0
 
-- Motor de partidas configurável por JSON, com `GameState`, `GameLoop`, ações legais e
-  reprodutibilidade por seed.
-- Variante `classic_us`, com compra, leilão, aluguel, impostos, prisão, cartas, construção,
-  hipotecas, resolução de dívida e falência conforme as simplificações descritas em
-  [ambiente.md](ambiente.md).
-- Partidas da engine com 2 a 12 participantes. `settings.json` é a fonte oficial para
-  valores e flags das regras; `board.json` descreve o tabuleiro e os aluguéis.
-- Interfaces Gymnasium para agente único contra oponentes fixos e PettingZoo AEC para
-  partidas multiagente. Os ambientes v1 aceitam de 2 a 4 participantes, pois a observação
-  tem quatro assentos.
-- Espaço discreto de ações, máscara de legalidade, observação numérica, recompensa de
-  vitória/derrota, renderização textual e baselines aleatório e guloso.
+A primeira release reuniu o motor configurável de partidas, a variante
+`classic_us`, observações e ações para os ambientes de RL e baselines simples.
+O motor permitia de 2 a 12 participantes. Os adaptadores então publicados
+usavam espaços fixos para até quatro participantes.
 
-## Fora do escopo da v1
+Naquele marco, trocas, liquidação expandida de dívidas, agentes treinados e API
+HTTP ainda estavam fora do escopo. As regras e limitações documentadas para
+essa versão não descrevem necessariamente a implementação atual.
 
-- API HTTP, persistência de partidas e gestão de sessões.
-- Agentes treinados, scripts de treinamento, checkpoints e rastreamento de experimentos.
-- Trocas entre jogadores e outras regras econômicas ampliadas.
-- Regras avançadas de dívida, incluindo tratar de forma exata a disponibilidade de casas
-  ao liquidar hotéis. As regras atuais de dívida são uma implementação simplificada.
-- Jackpot de estacionamento livre, timeout de leilão, juros sobre imóveis hipotecados
-  herdados e leilão de imóveis devolvidos ao banco.
-- Ambientes RL para mais de quatro participantes.
+## Evolução posterior
 
-## Limitações conhecidas
+Depois da v1.0.0, o motor recebeu o fluxo de propostas e contrapropostas,
+liquidação e leilões de insolvência, além de melhorias para venda de hotéis
+quando faltam casas físicas no banco. Os ambientes v2 passaram a expor as
+decisões estruturadas e as regras avançadas. Também foram acrescentados
+analytics condicionais, forecasts, baselines de simulação e interfaces para
+agentes e rollouts.
 
-O cálculo de liquidação considera o valor de venda de hotéis sem verificar o estoque de
-casas do banco. A engine, porém, impede a venda de hotel se não houver quatro casas
-disponíveis. Em estados raros com dívida e essa falta de estoque, o cálculo pode indicar
-recursos suficientes enquanto `legal_actions()` retorna uma lista vazia. Isso pode travar
-uma partida ou um oponente automático. A revisão da dívida deve resolver essa divergência;
-até lá, a v1 não deve prometer que todo estado de dívida é recuperável.
+O projeto ainda não fornece uma API HTTP de partidas nem um algoritmo/pipeline
+de treinamento com checkpoints. O plano atual para agentes está descrito em
+[`agents/README.md`](../agents/README.md).
 
-O Gymnasium também espera que o agente respeite a máscara de ações. Entradas inválidas
-fora do intervalo do espaço discreto não têm tratamento uniforme em todos os modos do
-adaptador.
+## Instalação e testes
 
-## Instalação e verificação
+As instruções de instalação atuais estão no [README](../readme.md). Execute a
+suíte do checkout e registre o ambiente utilizado ao preparar uma nova release;
+os resultados numéricos registrados em versões antigas não devem ser tratados
+como resultado de testes atuais.
 
-Requisitos: Python 3.11 ou superior. A engine usa NumPy; Gymnasium e PettingZoo são
-dependências opcionais para os ambientes RL.
+## Referências
 
-```bash
-pip install -e ".[dev]"
-pytest -q
-```
-
-Na verificação documentada para esta preparação, a suíte completa passou: **51 testes
-aprovados, nenhum ignorado**, incluindo as verificações de API do Gymnasium e PettingZoo,
-com Gymnasium 1.4.0 e PettingZoo 1.27.0. Os testes incluem partidas aleatórias de 2 a 4
-jogadores, uma partida aleatória de 12 jogadores limitada a 120 turnos, invariantes,
-reprodutibilidade, clonagem, máscaras e checadores das interfaces.
-
-## Evolução planejada para v2
-
-A v2 poderá ampliar as regras de dívida, adicionar trocas entre jogadores e implementar
-agentes treináveis e seus experimentos de avaliação. Mudanças no espaço de ações ou na
-observação devem usar uma nova versão do contrato; manter a v1 disponível evita invalidar
-modelos existentes.
-
-## Checklist antes de publicar
-
-- Revisar e aceitar ou corrigir a limitação de dívida descrita acima.
-- Definir a versão de distribuição do pacote: o contrato é `monopoly_v1`, mas o pacote
-  ainda está marcado como `0.1.0`.
-- Rodar `pytest -q` no ambiente de release e registrar as versões de Python e dependências.
-- Criar a tag e publicar o pacote somente quando o responsável pela release autorizar.
+- [Arquitetura e organização dos pacotes](arquitetura.md)
+- [Contratos de ambiente e regras](ambiente.md)
+- [Contrato do agente RL](contrato-agente-rl-v1.md)
+- [Contrato de observação RL v2](contrato-observacao-rl-v2.md)
+- [Informações condicionadas à decisão](informacoes-de-decisao.md)

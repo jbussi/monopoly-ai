@@ -65,6 +65,7 @@ class JailChoiceForecast:
     horizons: tuple[JailChoiceHorizonForecast, ...]
 
     def for_rounds(self, rounds: int) -> JailChoiceHorizonForecast:
+        """Return the jail-exit forecast for the requested number of turns."""
         for forecast in self.horizons:
             if forecast.horizon_rounds == rounds:
                 return forecast
@@ -81,6 +82,7 @@ class JailOpportunityAnalysis:
     choices: tuple[JailChoiceForecast, ...]
 
     def for_choice(self, action_type: str | ActionType) -> JailChoiceForecast:
+        """Return the forecast for a named jail-exit action."""
         action_name = str(action_type)
         for choice in self.choices:
             if choice.action_type == action_name:

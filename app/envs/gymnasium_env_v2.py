@@ -101,6 +101,7 @@ class MonopolyGymEnvV2(gym.Env):
         self.decision_features_space = self.decision_features_encoder.observation_space
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
+        """Start a reproducible episode and return its first observation."""
         super().reset(seed=seed)
         episode_seed = int(self.np_random.integers(2**31))
         self._setup_episode(seed=episode_seed)
@@ -116,6 +117,7 @@ class MonopolyGymEnvV2(gym.Env):
         return self._observation(), self._info()
 
     def step(self, action: dict[str, Any]):
+        """Apply one structured learner action and advance opponent policies."""
         try:
             game_action = self.action_map.to_game_action(action, self.loop)
             result = self.loop.process_action(game_action)
@@ -205,6 +207,7 @@ class MonopolyGymEnvV2(gym.Env):
         )
 
     def render(self) -> str | None:
+        """Render the current board as text, printing in human mode."""
         text = render_text(self.loop)
         if self.render_mode == "human":
             print(text)
@@ -225,13 +228,18 @@ class MonopolyGymEnvV2(gym.Env):
                 raise RuntimeError(f"A política oponente produziu uma ação inválida: {result}")
 
     def _observation(self) -> dict[str, Any]:
-        state = self.encoder.encode(self.loop, self.learner_id)
-        if self.loop.game.game_over or self.loop.current_decision_player_id != self.learner_id:
-            mask = self.action_map.action_mask(self.loop)
+        is_current_actor = (
+            not self.loop.game.game_over
+            and self.loop.current_decision_player_id == self.learner_id
+        )
+        legal_actions = self.loop.legal_actions() if is_current_actor else []
+        state = self.encoder.encode(
+            self.loop, self.learner_id, legal_actions=legal_actions
+        )
+        mask = self.action_map.action_mask(self.loop, legal_actions=legal_actions)
+        if not is_current_actor:
             for values in mask.values():
                 values.fill(0)
-        else:
-            mask = self.action_map.action_mask(self.loop)
         return {**state, "action_mask": mask}
 
     def _info(self) -> dict[str, Any]:

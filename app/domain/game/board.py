@@ -106,10 +106,12 @@ class Board:
 
     @property
     def tiles(self) -> tuple[Tile, ...]:
+        """Return board tiles in configured traversal order."""
         return self._tiles
 
     @property
     def size(self) -> int:
+        """Return the number of spaces on this board."""
         return len(self._tiles)
 
     def get_tile(self, position: int) -> Tile:
@@ -122,6 +124,7 @@ class Board:
         return self._property_tiles
 
     def group_members(self, group: str) -> tuple[PropertyTile, ...]:
+        """Return purchasable properties belonging to a named group."""
         return self._groups[group]
 
     def get_tile_by_id(self, tile_id: int) -> Tile:

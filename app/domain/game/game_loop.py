@@ -124,6 +124,7 @@ class GameLoop:
 
     @property
     def current_decision_player_id(self) -> UUID:
+        """Return the player responsible for the next pending decision."""
         if self.game.pending_trade is not None:
             return self.game.pending_trade.current_offer.recipient_id
 
@@ -147,14 +148,17 @@ class GameLoop:
 
     @property
     def auction_highest_bid(self) -> int:
+        """Return the active auction's highest bid, or zero before a bid."""
         return self._auction_highest_bid
 
     @property
     def auction_highest_bidder(self) -> UUID | None:
+        """Return the player currently leading the active auction, if any."""
         return self._auction_highest_bidder
 
     @property
     def current_auction_id(self) -> int | None:
+        """Return the active auction identifier, if one is in progress."""
         return self._active_auction_id
 
     def auction_bid_amount(self, increment: int) -> int:
@@ -162,6 +166,7 @@ class GameLoop:
         return max(self.rules.auction_min_bid, self._auction_highest_bid + increment)
 
     def unmortgage_cost(self, tile: PropertyTile) -> int:
+        """Calculate the bank redemption cost for a mortgaged property."""
         if tile.unmortgage_cost:
             return tile.unmortgage_cost
         return tile.mortgage_value + -(-tile.mortgage_value // 10)
@@ -635,6 +640,11 @@ class GameLoop:
     # ============================================================ processamento
 
     def process_action(self, action: GameAction) -> dict[str, Any]:
+        """Validate and apply an action, then advance automatic game effects.
+
+        Returns a status dictionary. Use this method instead of mutating
+        ``GameState`` directly so phase and turn transitions remain coherent.
+        """
         reason = self.validate(action)
         if reason is not None:
             return self._rejected(reason)

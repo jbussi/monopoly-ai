@@ -27,7 +27,10 @@ PHASES = (
 
 
 class ObservationEncoder:
+    """Encode a legacy-v1 game state as a fixed-size player-relative vector."""
+
     def __init__(self, loop: GameLoop, max_players: int = 4, max_turns: int = 1000) -> None:
+        """Set the vector layout and normalization scales from a game instance."""
         board = loop.game.board
         self.board_size = board.size
         self.tile_ids = tuple(tile.tile_id for tile in board.property_tiles)
@@ -54,6 +57,7 @@ class ObservationEncoder:
         self.size = offset
 
     def encode(self, loop: GameLoop, observer: UUID) -> np.ndarray:
+        """Return the current state vector from ``observer``'s seat ordering."""
         game = loop.game
         obs = np.zeros(self.size, dtype=np.float32)
 

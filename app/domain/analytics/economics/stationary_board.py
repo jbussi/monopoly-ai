@@ -76,6 +76,7 @@ class StationaryBoardAnalysis:
     assumptions: tuple[str, ...]
 
     def traffic_for(self, tile_id: int) -> PropertyTraffic:
+        """Return modeled landing and rent traffic for one board tile."""
         for traffic in self.property_traffic:
             if traffic.tile_id == tile_id:
                 return traffic
@@ -161,6 +162,7 @@ class _ConfiguredBoardMovementModel(TransitionModel[BoardMovementState]):
         self.mean_dice_total = (dice_sides[0] + 1) / 2 + (dice_sides[1] + 1) / 2
 
     def transitions_from(self, source: BoardMovementState):
+        """Return next movement states and their aggregated probabilities."""
         outcomes = self._outcomes(source)
         probabilities: dict[BoardMovementState, float] = defaultdict(float)
         for outcome in outcomes:
@@ -168,9 +170,11 @@ class _ConfiguredBoardMovementModel(TransitionModel[BoardMovementState]):
         return tuple(probabilities.items())
 
     def probability(self, source: BoardMovementState, target: BoardMovementState) -> float:
+        """Return the probability of transitioning between two board states."""
         return dict(self.transitions_from(source)).get(target, 0.0)
 
     def outcomes_from(self, source: BoardMovementState) -> tuple[_Outcome, ...]:
+        """Return detailed dice and card outcomes for a movement state."""
         return self._outcomes(source)
 
     def _outcomes(self, source: BoardMovementState) -> tuple[_Outcome, ...]:

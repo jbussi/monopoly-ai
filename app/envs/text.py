@@ -6,6 +6,7 @@ from app.domain.game.game_state import HOTEL_LEVEL
 
 
 def describe_action(loop: GameLoop, action: GameAction) -> str:
+    """Format an action with the board name or value relevant to a person."""
     board = loop.game.board
     if "tile_id" in action.payload:
         return f"{action.action_type} {board.get_tile_by_id(action.payload['tile_id']).name}"
@@ -18,6 +19,7 @@ def describe_action(loop: GameLoop, action: GameAction) -> str:
 
 
 def render_text(loop: GameLoop) -> str:
+    """Render players, properties, current phase and legal actions as text."""
     game = loop.game
     seat = {player_id: i for i, player_id in enumerate(game.turn_order)}
     lines = [

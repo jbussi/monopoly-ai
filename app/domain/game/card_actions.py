@@ -39,7 +39,10 @@ CardActionHandler = Callable[
 
 
 class CardActionRegistry:
+    """Map card action identifiers to the functions that execute their effects."""
+
     def __init__(self) -> None:
+        """Create an empty registry for card handlers."""
         self._handlers: dict[str, CardActionHandler] = {}
 
     def register(
@@ -47,6 +50,7 @@ class CardActionRegistry:
         action: str,
         handler: CardActionHandler,
     ) -> None:
+        """Register a unique action identifier and its execution handler."""
         if not action.strip():
             raise ValueError("O nome da ação não pode ser vazio.")
 
@@ -62,6 +66,7 @@ class CardActionRegistry:
         card: CardLike,
         context: Any,
     ) -> CardExecutionResult:
+        """Run the registered handler for a card in the supplied game context."""
         handler = self._handlers.get(card.action)
 
         if handler is None:
@@ -73,4 +78,5 @@ class CardActionRegistry:
 
     @property
     def registered_actions(self) -> tuple[str, ...]:
+        """Return registered action identifiers in stable sorted order."""
         return tuple(sorted(self._handlers))
