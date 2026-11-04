@@ -205,14 +205,14 @@ class StructuredActionSpace:
             actor_seat = loop.game.turn_order.index(loop.current_decision_player_id)
             target_seat = loop.game.turn_order.index(game_action.payload["target_player_id"])
             action["target_player"] = (target_seat - actor_seat) % len(loop.game.turn_order)
-        for key, index in (
-            ("properties_offered", self.property_index),
-            ("properties_requested", self.property_index),
-            ("jail_cards_offered", self.jail_card_index),
-            ("jail_cards_requested", self.jail_card_index),
+        for payload_key, action_key, index in (
+            ("properties_offered", "offered_properties", self.property_index),
+            ("properties_requested", "requested_properties", self.property_index),
+            ("jail_cards_offered", "offered_jail_cards", self.jail_card_index),
+            ("jail_cards_requested", "requested_jail_cards", self.jail_card_index),
         ):
-            if key in game_action.payload:
-                action[key] = self._ids_to_bits(game_action.payload[key], index)
+            if payload_key in game_action.payload:
+                action[action_key] = self._ids_to_bits(game_action.payload[payload_key], index)
         for key in ("money_offered", "money_requested"):
             if key in game_action.payload:
                 action[key][0] = game_action.payload[key]

@@ -25,10 +25,12 @@ app/
 │   ├── analytics/         análises de tabuleiro, economia e decisões
 │   └── agents/            protocolos e adaptadores de políticas
 ├── envs/                  Gymnasium, PettingZoo, baselines e simulação
+├── training/              treinador experimental PPO
 ├── api/                   dependências preparatórias; sem API HTTP implementada
 └── main.py                ponto de entrada da aplicação
 configs/games/classic_us/  configuração da variante clássica
 data/analytics/            notebooks e artefatos exploratórios
+notebooks/                 avaliação, treinamento e gráficos
 docs/                      contratos e guias do projeto
 tests/                     regras, análises e adaptadores
 ```
@@ -46,7 +48,8 @@ pip install -e ".[dev]"
 ```
 
 O pacote principal requer NumPy. O extra `envs` instala Gymnasium e PettingZoo;
-o extra `dev` acrescenta pytest.
+o extra `dev` acrescenta pytest. O extra `notebooks` instala PyTorch e as
+bibliotecas para executar o notebook e gerar gráficos.
 
 ## Uso rápido
 
@@ -66,9 +69,13 @@ Simule baselines:
 python -m app.envs.simulate --games 100 --policies greedy random --seed 2026
 ```
 
+Abra [`notebooks/avaliacao_e_treinamento_ppo.ipynb`](notebooks/avaliacao_e_treinamento_ppo.ipynb)
+para executar comparações reproduzíveis das baselines e gerar gráficos. A parte
+de PPO é experimental e opcional no notebook; a instrução de treino está em
+[`docs/treinamento-ppo.md`](docs/treinamento-ppo.md).
+
 Para ambientes v2, instale o extra `envs` e siga os contratos de ambiente e de
-agente. O projeto ainda não inclui uma API HTTP nem um algoritmo ou pipeline de
-treinamento.
+agente. O treinador PPO ainda é experimental. O projeto não inclui uma API HTTP.
 
 ## Verificações
 

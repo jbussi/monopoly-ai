@@ -35,6 +35,7 @@ agente.
 | `app/domain/analytics/` | Markov, valuation, forecasts e features | `evaluate_candidate()`, `DecisionFeaturesEncoder` |
 | `app/domain/agents/` | Protocolos de políticas e geradores de candidatas | `Agent`, `RLAgent`, `FeaturePolicy` |
 | `app/envs/` | Gymnasium, PettingZoo, observações, ações, baselines e simulador | `MonopolyGymEnvV2`, `pettingzoo_env_v2`, `simulate` |
+| `app/training/` | Treinador experimental PPO mascarado para ações candidatas | `PPOTrainingConfig`, `train_ppo()` |
 | `app/api/` | Dependências preparatórias para integração futura | Ainda sem endpoints HTTP |
 | `agents/` | Documentação do estado dos agentes e do treinamento | `agents/README.md` |
 | `configs/games/` | Variantes declarativas de tabuleiro, cartas e regras | `classic_us/` |
@@ -86,9 +87,10 @@ parâmetros de ações estruturadas. `evaluate_candidate()` e
 apresenta candidatas legais como índices discretos e pode calcular features de
 troca sob demanda.
 
-O projeto inclui baselines e utilitários de rollout. Ainda não inclui algoritmo
-de treino, gerenciamento de checkpoints, rastreamento de experimentos ou
-agentes treinados. `app/api/` ainda não contém uma API HTTP de partidas.
+O projeto inclui baselines, utilitários de rollout e um treinador experimental
+de PPO categórico mascarado em `app/training/`. O treinador ainda não inclui
+gerenciamento de experimentos nem self-play; não há agente treinado versionado.
+`app/api/` ainda não contém uma API HTTP de partidas.
 
 ## Dependências entre camadas
 

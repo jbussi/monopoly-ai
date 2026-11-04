@@ -2,10 +2,11 @@
 
 ## Estado atual
 
-Não há agentes treinados nem código de treinamento nesta pasta. Os únicos agentes
-executáveis são os baselines `RandomPolicy` e `GreedyPolicy` em `app/envs/baselines.py`.
-O ambiente de jogo completo v2 já existe em `app/envs`, mas ainda não há algoritmo de
-treinamento, checkpoint/modelo treinado, experimento de self-play nem benchmark de força.
+Não há checkpoints treinados versionados nesta pasta. Além das baselines
+`RandomPolicy` e `GreedyPolicy` em `app/envs/baselines.py`, existe um treinador
+experimental PPO mascarado em `app/training/ppo.py`. Ele gera uma política
+categórica sobre ações candidatas legais e usa uma rede neural ator-crítico.
+Ainda não há self-play nem benchmark concluído de uma política treinada.
 
 ## Contrato disponível
 
@@ -69,7 +70,7 @@ por jogador. A observação e sua máscara são entregues apenas ao ator cuja ve
 atual. Agentes com memória recorrente devem usar uma instância por assento;
 atores sem estado podem ser compartilhados.
 
-O ambiente não impõe framework nem algoritmo. O contrato com o motor está em
+O contrato com o motor está em
 [`docs/ambiente.md`](../docs/ambiente.md), e o escopo da versão está em
 [`docs/release-v1.md`](../docs/release-v1.md). Em resumo:
 
@@ -83,7 +84,8 @@ O motor e os adaptadores v2 aceitam de 2 a 12 jogadores; por padrão, os ambient
 até quatro. Para integrar um modelo como oponente no Gymnasium, embrulhe-o como
 `policy(loop) -> GameAction` (exemplo no docstring de `app/envs/baselines.py`).
 
-O próximo trabalho é escolher e implementar a primeira abordagem de treino,
-incluindo recompensa, tratamento da consulta de analytics e avaliação contra
-baselines. Treinamento, teoria dos jogos nas trocas e experimentos reproduzíveis
-ainda não estão implementados.
+O treinador PPO, a configuração inicial e as métricas estão em
+[`docs/treinamento-ppo.md`](../docs/treinamento-ppo.md). As baselines atuais
+recusam ofertas recebidas; criar oponentes capazes de negociar é necessário
+antes de avaliar o aprendizado de trocas. Self-play e teoria dos jogos ficam
+para uma etapa posterior.

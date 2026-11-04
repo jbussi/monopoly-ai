@@ -183,7 +183,8 @@ def main() -> None:
             values["match_losses"] += int(
                 game.winner_id is not None and winner_policy != label
             )
-            values["match_draws"] += int(game.winner_id is None)
+            # A truncagem é um episódio inconclusivo, não um empate.
+            values["match_draws"] += int(game.winner_id is None and not game.truncated)
             values["truncated_games"] += int(game.truncated)
             values["no_winner_games"] += int(game.winner_id is None and not game.truncated)
 
@@ -237,6 +238,7 @@ def main() -> None:
         match_wins = int(values["match_wins"])
         match_losses = int(values["match_losses"])
         match_draws = int(values["match_draws"])
+        truncated_matches = int(values["truncated_games"])
         decisive_matches = int(values["decided_matches"])
         match_rate = match_wins / matches if matches else 0.0
         decisive_rate = match_wins / decisive_matches if decisive_matches else 0.0
@@ -253,7 +255,8 @@ def main() -> None:
                 f"{matchup_name}: W–L–D {match_wins}–{match_losses}–{match_draws} "
                 f"em {matches} partidas "
                 f"({match_rate:.1%}; IC95% {low:.1%}–{high:.1%}; "
-                f"{decisive_rate:.1%} nas decididas)"
+                f"{decisive_rate:.1%} nas decididas; "
+                f"{truncated_matches} truncadas)"
             )
         else:
             outcome_summary = (
