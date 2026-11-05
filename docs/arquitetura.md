@@ -35,7 +35,7 @@ agente.
 | `app/domain/analytics/` | Markov, valuation, forecasts e features | `evaluate_candidate()`, `DecisionFeaturesEncoder` |
 | `app/domain/agents/` | Protocolos de políticas e geradores de candidatas | `Agent`, `RLAgent`, `FeaturePolicy` |
 | `app/envs/` | Gymnasium, PettingZoo, observações, ações, baselines e simulador | `MonopolyGymEnvV2`, `pettingzoo_env_v2`, `simulate` |
-| `app/training/` | Treinador experimental PPO mascarado para ações candidatas | `PPOTrainingConfig`, `train_ppo()` |
+| `app/training/` | Treino PPO mascarado em liga de quatro jogadores e banco por geração | `PPOTrainingConfig`, `train_ppo()` |
 | `app/api/` | Dependências preparatórias para integração futura | Ainda sem endpoints HTTP |
 | `agents/` | Documentação do estado dos agentes e do treinamento | `agents/README.md` |
 | `configs/games/` | Variantes declarativas de tabuleiro, cartas e regras | `classic_us/` |

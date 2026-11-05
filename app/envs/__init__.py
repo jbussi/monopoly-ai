@@ -3,7 +3,7 @@
 from importlib import import_module
 
 from .action_space import DiscreteActionSpace
-from .baselines import GreedyPolicy, Policy, RandomPolicy
+from .baselines import AggressivePolicy, ConservativePolicy, GreedyPolicy, Policy, RandomPolicy
 from .cash_flow_forecast import (
     CashFlowForecast,
     CashFlowHorizonForecast,
@@ -21,6 +21,8 @@ __all__ = [
     "CashFlowForecast",
     "CashFlowHorizonForecast",
     "CandidateSelectionEnv",
+    "AggressivePolicy",
+    "ConservativePolicy",
     "ENV_VERSION",
     "ENV_VERSION_V2",
     "GreedyPolicy",

@@ -84,8 +84,8 @@ O motor e os adaptadores v2 aceitam de 2 a 12 jogadores; por padrão, os ambient
 até quatro. Para integrar um modelo como oponente no Gymnasium, embrulhe-o como
 `policy(loop) -> GameAction` (exemplo no docstring de `app/envs/baselines.py`).
 
-O treinador PPO, a configuração inicial e as métricas estão em
-[`docs/treinamento-ppo.md`](../docs/treinamento-ppo.md). As baselines atuais
-recusam ofertas recebidas; criar oponentes capazes de negociar é necessário
-antes de avaliar o aprendizado de trocas. Self-play e teoria dos jogos ficam
-para uma etapa posterior.
+O treinador PPO em liga, as três heurísticas e o banco de políticas por geração
+estão em [`docs/treinamento-ppo.md`](../docs/treinamento-ppo.md). As heurísticas
+respondem a ofertas de forma simples, sem avaliar valor nem fazer
+contrapropostas; aprender negociação exige oponentes mais completos. Self-play
+simultâneo e teoria dos jogos ficam para uma etapa posterior.

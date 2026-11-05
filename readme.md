@@ -69,9 +69,9 @@ Simule baselines:
 python -m app.envs.simulate --games 100 --policies greedy random --seed 2026
 ```
 
-Abra [`notebooks/avaliacao_e_treinamento_ppo.ipynb`](notebooks/avaliacao_e_treinamento_ppo.ipynb)
-para executar comparações reproduzíveis das baselines e gerar gráficos. A parte
-de PPO é experimental e opcional no notebook; a instrução de treino está em
+Abra [`notebooks/treinamento_liga_ppo.ipynb`](notebooks/treinamento_liga_ppo.ipynb)
+para treinar PPO em partidas de quatro jogadores contra as três heurísticas e
+arquivar políticas por geração. A instrução de treino está em
 [`docs/treinamento-ppo.md`](docs/treinamento-ppo.md).
 
 Para ambientes v2, instale o extra `envs` e siga os contratos de ambiente e de

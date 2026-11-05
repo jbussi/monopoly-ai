@@ -6,9 +6,12 @@ from .ppo import (
     load_ppo_checkpoint,
     train_ppo,
 )
+from .league import CallableTrainingLeague, TrainingLeague
 
 __all__ = [
     "PPOTrainingConfig",
+    "TrainingLeague",
+    "CallableTrainingLeague",
     "evaluate_ppo_matchups",
     "load_ppo_checkpoint",
     "train_ppo",

@@ -57,6 +57,7 @@ Manter políticas e parâmetros fixos durante uma rodada de avaliação. O conju
 inicial de referência é:
 
 - `random`, como teste de sanidade;
+- `aggressive` e `conservative`, que compõem a liga inicial do treinamento PPO;
 - `greedy:0`, `greedy:25`, `greedy:50` e `greedy:150`, para cobrir diferentes
   reservas de caixa da baseline Greedy.
 

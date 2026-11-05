@@ -7,6 +7,8 @@ features and the current observation, so candidate row order has no meaning.
 from __future__ import annotations
 
 import random
+import copy
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -18,20 +20,22 @@ from gymnasium import spaces
 from torch import nn
 from torch.distributions import Categorical
 
-from app.envs.baselines import GreedyPolicy, RandomPolicy
+from app.envs.baselines import AggressivePolicy, ConservativePolicy, RandomPolicy
 from app.envs.candidate_env import CandidateSelectionEnv
 from app.envs.gymnasium_env_v2 import MonopolyGymEnvV2
+from app.envs.action_space_v2 import ACTION_TYPES
+from app.training.league import TrainingLeague
 
 
 @dataclass(frozen=True)
 class PPOTrainingConfig:
-    """Settings for a reproducible first PPO experiment."""
+    """Settings for population PPO training in four-player games."""
 
-    episodes: int = 100
+    episodes: int = 1000
     seed: int = 2026
-    num_players: int = 2
+    num_players: int = 4
     max_turns: int = 1000
-    max_candidates: int = 64
+    max_candidates: int = 128
     episodes_per_update: int = 8
     update_epochs: int = 4
     minibatch_size: int = 32
@@ -42,9 +46,13 @@ class PPOTrainingConfig:
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.01
     hidden_size: int = 128
-    evaluation_interval: int = 20
+    action_type_embedding_size: int = 16
+    evaluation_interval: int = 0
     evaluation_games: int = 20
-    trade_analysis_mode: str = "disabled"
+    generation_size: int = 100
+    archive_opponent_rate: float = 0.5
+    archive_dir: str = "runs/policy_bank"
+    trade_analysis_mode: str = "automatic"
     device: str = "cpu"
 
     def __post_init__(self) -> None:
@@ -52,36 +60,49 @@ class PPOTrainingConfig:
             raise ValueError("episodes e episodes_per_update devem ser positivos.")
         if not 2 <= self.num_players <= 12:
             raise ValueError("num_players deve estar entre 2 e 12.")
-        if self.max_turns < 1 or self.max_candidates < 1:
-            raise ValueError("max_turns e max_candidates devem ser positivos.")
+        if self.max_turns < 1 or self.max_candidates < 1 or self.action_type_embedding_size < 1:
+            raise ValueError("max_turns, max_candidates e action_type_embedding_size devem ser positivos.")
         if self.trade_analysis_mode not in {"disabled", "automatic"}:
             raise ValueError("use trade_analysis_mode='disabled' ou 'automatic'.")
+        if self.generation_size < 1:
+            raise ValueError("generation_size deve ser positivo.")
+        if not 0.0 <= self.archive_opponent_rate <= 1.0:
+            raise ValueError("archive_opponent_rate deve estar entre 0 e 1.")
 
 
-class _BaselinePool:
-    """Choose a seeded baseline profile once per episode."""
+class _ArchivedPolicy:
+    """Run a frozen PPO checkpoint as an opponent in the shared live game."""
 
-    def __init__(self) -> None:
-        self.policy: Any = GreedyPolicy()
+    def __init__(self, agent: _CandidatePPO, candidate_env: CandidateSelectionEnv, seed: int):
+        self.agent = agent
+        self.candidate_env = candidate_env
+        self.base_env = candidate_env.env
+        self.rng = random.Random(seed)
 
     def reset(self, seed: int | None = None) -> None:
-        rng = random.Random(seed)
-        profiles = (
-            lambda: RandomPolicy(seed),
-            lambda: GreedyPolicy(reserve=0),
-            lambda: GreedyPolicy(reserve=25),
-            lambda: GreedyPolicy(reserve=50),
-            lambda: GreedyPolicy(reserve=150),
-        )
-        self.policy = rng.choice(profiles)()
+        if seed is not None:
+            self.rng.seed(seed)
 
     def __call__(self, loop):
-        return self.policy(loop)
+        player_id = loop.current_decision_player_id
+        original_id = self.base_env.learner_id
+        self.base_env.learner_id = player_id
+        try:
+            observation = self.base_env._observation()
+            observation = self.candidate_env._with_candidates(observation)
+            state = self.agent.encode(observation)
+            with torch.no_grad(), torch.random.fork_rng(devices=[]):
+                torch.manual_seed(self.rng.getrandbits(63))
+                index = self.agent.act(state, deterministic=False)[0]
+            return self.candidate_env.candidate_actions[index]
+        finally:
+            self.base_env.learner_id = original_id
 
 
 @dataclass
 class _State:
     global_features: np.ndarray
+    candidate_types: np.ndarray
     candidate_actions: np.ndarray
     candidate_mask: np.ndarray
     analysis_indices: np.ndarray
@@ -91,16 +112,25 @@ class _State:
 class _ActorCritic(nn.Module):
     """Shared state encoder, per-candidate actor, and state-value critic."""
 
-    def __init__(self, global_size: int, action_size: int, analysis_size: int, hidden: int):
+    def __init__(
+        self,
+        global_size: int,
+        action_size: int,
+        analysis_size: int,
+        num_action_types: int,
+        type_embedding_size: int,
+        hidden: int,
+    ):
         super().__init__()
         self.global_encoder = nn.Sequential(
             nn.Linear(global_size, hidden), nn.Tanh(),
             nn.Linear(hidden, hidden), nn.Tanh(),
         )
+        self.action_type_embedding = nn.Embedding(num_action_types, type_embedding_size)
         self.action_encoder = nn.Sequential(nn.Linear(action_size, hidden // 2), nn.Tanh())
-        self.analysis_encoder = nn.Sequential(nn.Linear(analysis_size, hidden // 2), nn.Tanh())
+        self.decision_encoder = nn.Sequential(nn.Linear(analysis_size, hidden // 2), nn.Tanh())
         self.actor = nn.Sequential(
-            nn.Linear(hidden + hidden // 2 + hidden // 2 + 1, hidden),
+            nn.Linear(hidden + type_embedding_size + hidden // 2 + hidden // 2 + 1, hidden),
             nn.Tanh(), nn.Linear(hidden, 1),
         )
         self.critic = nn.Linear(hidden, 1)
@@ -112,11 +142,15 @@ class _ActorCritic(nn.Module):
         actions = torch.as_tensor(
             state.candidate_actions, dtype=torch.float32, device=device
         )
+        action_types = torch.as_tensor(
+            state.candidate_types, dtype=torch.long, device=device
+        )
         mask = torch.as_tensor(state.candidate_mask, dtype=torch.bool, device=device)
         state_embedding = self.global_encoder(global_features)
+        type_embedding = self.action_type_embedding(action_types)
         action_embedding = self.action_encoder(actions)
         analysis_embedding = torch.zeros(
-            (len(actions), self.analysis_encoder[0].out_features),
+            (len(actions), self.decision_encoder[0].out_features),
             dtype=torch.float32,
             device=device,
         )
@@ -126,11 +160,11 @@ class _ActorCritic(nn.Module):
             features = torch.as_tensor(
                 state.analysis_features, dtype=torch.float32, device=device
             )
-            analysis_embedding[indices] = self.analysis_encoder(features)
+            analysis_embedding[indices] = self.decision_encoder(features)
             has_analysis[indices] = 1.0
         repeated_state = state_embedding.expand(len(actions), -1)
         logits = self.actor(torch.cat(
-            (repeated_state, action_embedding, analysis_embedding, has_analysis), dim=-1
+            (repeated_state, type_embedding, action_embedding, analysis_embedding, has_analysis), dim=-1
         )).squeeze(-1)
         logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
         return logits, self.critic(state_embedding).squeeze(-1)
@@ -156,8 +190,15 @@ class _CandidatePPO:
         global_size = int(np.prod(spaces.flatten_space(self.global_space).shape))
         self.action_size = env.action_feature_size
         self.analysis_size = env.decision_feature_size
+        self.num_action_types = len(ACTION_TYPES)
+        self.type_embedding_size = config.action_type_embedding_size
         self.network = _ActorCritic(
-            global_size, self.action_size, self.analysis_size, config.hidden_size
+            global_size,
+            self.action_size - self.num_action_types,
+            self.analysis_size,
+            self.num_action_types,
+            self.type_embedding_size,
+            config.hidden_size,
         ).to(self.device)
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=config.learning_rate)
 
@@ -173,16 +214,28 @@ class _CandidatePPO:
         n = int(np.count_nonzero(mask[:-1]))
         candidate_mask = mask[:n]
         candidates = np.asarray(observation["candidate_actions"][:n], dtype=np.float32)
+        type_vectors = candidates[:, :self.num_action_types]
+        candidate_types = np.argmax(type_vectors, axis=1).astype(np.int64)
+        candidate_payloads = candidates[:, self.num_action_types:]
         analysis_mask = np.asarray(observation["candidate_analysis_mask"][:n], dtype=bool)
         analysis_indices = np.flatnonzero(analysis_mask).astype(np.int64)
         analysis_features = np.asarray(
             observation["candidate_decision_features"][analysis_indices], dtype=np.float32
         )
-        candidates = np.nan_to_num(candidates, nan=0.0, posinf=1e6, neginf=-1e6)
+        candidate_payloads = np.nan_to_num(
+            candidate_payloads, nan=0.0, posinf=1e6, neginf=-1e6
+        )
         analysis_features = np.nan_to_num(
             analysis_features, nan=0.0, posinf=1e6, neginf=-1e6
         )
-        return _State(global_features, candidates, candidate_mask, analysis_indices, analysis_features)
+        return _State(
+            global_features,
+            candidate_types,
+            candidate_payloads,
+            candidate_mask,
+            analysis_indices,
+            analysis_features,
+        )
 
     def act(self, state: _State, deterministic: bool = False):
         logits, value = self.network.forward_one(state, self.device)
@@ -249,14 +302,22 @@ class _CandidatePPO:
 
 def _make_env(config: PPOTrainingConfig) -> CandidateSelectionEnv:
     return _make_env_with_opponents(
-        config, [_BaselinePool() for _ in range(config.num_players - 1)]
+        config, _heuristic_lineup(config.num_players - 1)
     )
+
+
+def _heuristic_lineup(count: int) -> list[Any]:
+    league = TrainingLeague()
+    names = tuple(league.heuristics)
+    return [league.create_heuristic(names[index % len(names)]) for index in range(count)]
 
 
 def _make_env_with_opponents(config: PPOTrainingConfig, opponents) -> CandidateSelectionEnv:
     base = MonopolyGymEnvV2(
         num_players=config.num_players,
-        max_players=config.num_players,
+        # Keep observation/action dimensions stable so archived policies can
+        # face games with a different active player count.
+        max_players=12,
         max_turns=config.max_turns,
         opponents=opponents,
     )
@@ -350,16 +411,10 @@ def evaluate_ppo(
 def _make_named_baseline(name: str):
     if name == "random":
         return RandomPolicy()
-    if name == "greedy":
-        return GreedyPolicy(reserve=150)
-    if name.startswith("greedy:"):
-        try:
-            reserve = int(name.split(":", 1)[1])
-        except ValueError as exc:
-            raise ValueError(f"Baseline Greedy inválida: {name!r}.") from exc
-        if reserve < 0:
-            raise ValueError("A reserva da Greedy deve ser não negativa.")
-        return GreedyPolicy(reserve=reserve)
+    if name == "aggressive":
+        return AggressivePolicy()
+    if name == "conservative":
+        return ConservativePolicy()
     raise ValueError(f"Baseline desconhecida: {name!r}.")
 
 
@@ -367,7 +422,7 @@ def evaluate_ppo_matchups(
     agent: _CandidatePPO,
     config: PPOTrainingConfig,
     *,
-    opponents: tuple[str, ...] = ("random", "greedy:0", "greedy:25", "greedy:50", "greedy:150"),
+    opponents: tuple[str, ...] = ("random", "aggressive", "conservative"),
     games: int = 100,
     seed: int = 2026,
 ) -> list[dict[str, Any]]:
@@ -409,6 +464,13 @@ def load_ppo_checkpoint(
 ) -> tuple[_CandidatePPO, PPOTrainingConfig]:
     """Load a PPO checkpoint and its saved configuration for evaluation."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if checkpoint.get("format") not in {
+        "monopoly-ai-ppo-v2",
+        "monopoly-ai-policy-v2",
+    }:
+        raise ValueError(
+            "Checkpoint incompatível com a arquitetura PPO atual; gere um novo checkpoint."
+        )
     if config is None:
         config = PPOTrainingConfig(**checkpoint["config"])
     env = _make_env(config)
@@ -422,10 +484,14 @@ def train_ppo(
     config: PPOTrainingConfig | None = None,
     *,
     checkpoint_path: str | Path | None = None,
+    league: TrainingLeague | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[_CandidatePPO, list[dict[str, float]]]:
-    """Train a masked PPO policy and return it with episode/evaluation metrics."""
+    """Train PPO against heuristics and a growing archive of past generations."""
     config = config or PPOTrainingConfig()
+    training_league = league or TrainingLeague(
+        archive_opponent_rate=config.archive_opponent_rate
+    )
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -433,19 +499,116 @@ def train_ppo(
     agent = _CandidatePPO(env, config)
     history: list[dict[str, float]] = []
     pending: list[dict[str, Any]] = []
+    archive: list[tuple[int, _CandidatePPO]] = []
+    archive_root = Path(config.archive_dir)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    profile_counts = {name: 0 for name in training_league.heuristics}
+    profile_counts["archive"] = 0
+    archive_generation_counts: dict[str, int] = {}
+    generation = 0
+    manifest_path = archive_root / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("format") != "monopoly-ai-policy-bank-v2":
+            raise ValueError(
+                "Banco de políticas incompatível com a arquitetura PPO atual. "
+                "Configure um novo archive_dir para começar um banco v2."
+            )
+        for entry in manifest.get("policies", []):
+            policy_path = archive_root / entry["path"]
+            if not policy_path.exists():
+                continue
+            saved = torch.load(policy_path, map_location="cpu", weights_only=True)
+            if saved.get("format") != "monopoly-ai-policy-v2":
+                raise ValueError(
+                    f"Política arquivada incompatível com a arquitetura atual: {policy_path}. "
+                    "Use um banco novo ou treine snapshots v2."
+                )
+            snapshot = _CandidatePPO(env, config)
+            snapshot.network.load_state_dict(saved["model"])
+            snapshot.network.eval()
+            archive.append((int(saved["generation"]), snapshot))
+            generation = max(generation, int(saved["generation"]))
+
+    def save_generation(episode_number: int) -> None:
+        nonlocal generation
+        generation += 1
+        snapshot = _CandidatePPO(env, config)
+        snapshot.network.load_state_dict(copy.deepcopy(agent.network.state_dict()))
+        snapshot.network.eval()
+        archive.append((generation, snapshot))
+        payload_config = asdict(config)
+        path = archive_root / f"generation_{generation:05d}.pt"
+        torch.save({
+            "format": "monopoly-ai-policy-v2",
+            "generation": generation,
+            "episode": episode_number,
+            "model": snapshot.network.state_dict(),
+            "config": payload_config,
+            "opponent_exposure": {
+                **profile_counts,
+                "archive_generations": dict(archive_generation_counts),
+            },
+        }, path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"format": "monopoly-ai-policy-bank-v2", "policies": []}
+        manifest["policies"].append({
+            "generation": generation,
+            "episode": episode_number,
+            "path": path.name,
+            "opponent_exposure": {
+                **profile_counts,
+                "archive_generations": dict(archive_generation_counts),
+            },
+        })
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        profile_counts.update({key: 0 for key in profile_counts})
+        archive_generation_counts.clear()
+
     for episode in range(config.episodes):
+        episode_rng = random.Random(config.seed + episode)
+        profile_names = training_league.sample_lineup(
+            config.num_players - 1,
+            archive_available=bool(archive),
+            rng=episode_rng,
+            episode_index=episode,
+        )
+        lineup = []
+        for seat, profile_name in enumerate(profile_names):
+            if profile_name == "archive":
+                old_generation, old_agent = episode_rng.choice(archive)
+                lineup.append(_ArchivedPolicy(
+                    old_agent,
+                    env,
+                    seed=config.seed + episode * 31 + seat + old_generation,
+                ))
+                profile_counts["archive"] += 1
+                generation_label = str(old_generation)
+                archive_generation_counts[generation_label] = archive_generation_counts.get(generation_label, 0) + 1
+            else:
+                lineup.append(training_league.create_heuristic(profile_name))
+                profile_counts[profile_name] += 1
+        env.env.opponents = lineup
         if progress_callback is not None:
-            progress_callback({"event": "episode_start", "episode": float(episode + 1)})
+            progress_callback({
+                "event": "episode_start",
+                "episode": float(episode + 1),
+                "generation": float(generation + 1),
+                "opponents": tuple(profile_names),
+            })
         trajectory, outcome = _episode(env, agent, config.seed + episode, training=True)
         pending.extend(trajectory)
         row = {"episode": float(episode + 1), **{key: float(value) for key, value in outcome.items()}}
-        if (episode + 1) % config.episodes_per_update == 0 or episode + 1 == config.episodes:
+        generation_finished = (episode + 1) % config.generation_size == 0 or episode + 1 == config.episodes
+        if (episode + 1) % config.episodes_per_update == 0 or generation_finished:
             row.update(agent.update(pending))
             pending.clear()
         if config.evaluation_interval and (episode + 1) % config.evaluation_interval == 0:
             row.update({f"eval_{key}": value for key, value in evaluate_ppo(
                 agent, config, seed=config.seed + 100_000 + episode * config.evaluation_games
             ).items() if key != "games"})
+        if generation_finished:
+            save_generation(episode + 1)
+            row["generation"] = float(generation)
         history.append(row)
         if progress_callback is not None:
             progress_callback({**row, "event": "episode_end"})
@@ -454,6 +617,7 @@ def train_ppo(
         path = Path(checkpoint_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
+            "format": "monopoly-ai-ppo-v2",
             "model": agent.network.state_dict(),
             "optimizer": agent.optimizer.state_dict(),
             "config": asdict(config),
