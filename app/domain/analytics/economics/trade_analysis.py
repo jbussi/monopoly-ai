@@ -15,7 +15,11 @@ from app.domain.analytics.economics.game_valuation import (
 from app.domain.game.actions import ActionType, GameAction
 from app.domain.game.game_loop import GameLoop, MORTGAGE_TRANSFER_INTEREST_PERCENT
 from app.domain.game.trade import TradeContextRecord, TradeOffer
-from app.envs.cash_flow_forecast import CashFlowForecast, forecast_cash_flow
+from app.envs.cash_flow_forecast import (
+    DEFAULT_HORIZONS as CASH_FLOW_HORIZONS,
+    CashFlowForecast,
+    forecast_cash_flow,
+)
 from app.infraestructure.game_config.models import GameConfig
 
 
@@ -97,10 +101,10 @@ def analyze_pending_trade(
     greedy_reserve: int = 150,
     discount_rate_per_round: float | None = None,
 ) -> TradeConditionalAnalysis:
-    """Expose accept/reject forecasts and portfolio facts for both players.
+    """Expose accept/reject cash projections and portfolio facts for both players.
 
-    Forecasts force the response once, then use GreedyPolicy for every later
-    action by every player. No common utility or recommendation is calculated.
+    The cash projection uses Markov movement with current holdings fixed after
+    acceptance or rejection. It makes no recommendation or utility judgment.
     Portfolio values report whole-portfolio rent estimates and their change.
     """
     negotiation = loop.game.pending_trade
@@ -176,7 +180,8 @@ def analyze_pending_trade(
             cash_forecast = forecast_cash_flow(
                 loop,
                 player_id,
-                horizons=horizon_values,
+                config=config,
+                horizons=CASH_FLOW_HORIZONS,
                 simulations=simulations,
                 seed=effective_seed,
                 greedy_reserve=greedy_reserve,

@@ -89,15 +89,16 @@ pública dos baralhos em `deck_card_counts`.
 O retorno esperado de voltar a circular é uma estimativa derivada, não um fato
 do estado. `jail_forecast` compara tentar duplas, pagar a multa e usar uma carta,
 nessa ordem, nos horizontes próprios de 1, 3 e 5 turnos. `jail_decision_forecast`
-simula essas opções usando o motor completo; consulte os campos `horizons`,
-`option_available` e `sample_count` na própria observação para saber quais
-horizontes e ações estão disponíveis e quantas simulações foram feitas.
+usa 1 e 2 rodadas para as probabilidades de movimento e fluxo monetário com a
+carteira fixa; consulte
+`horizons`, `option_available` e `sample_count`. Nesse forecast analítico,
+`sample_count` é zero, pois não são coletadas amostras.
 
 `jail_forecast` informa métricas do movimento e da oportunidade de circular,
 incluindo posição, caixa, dívidas, aluguel/impostos cobrados e imóveis livres
-encontrados. `jail_decision_forecast` acrescenta distribuição de caixa,
-probabilidades de dívida e falência, chance de ainda estar preso, cartas
-restantes e oportunidades condicionais por propriedade. As previsões usam as
-políticas e a aleatoriedade controlada descritas no
-[guia de ambiente](ambiente.md). Elas descrevem cenários condicionais e não
-somam métricas em uma recomendação ou no lucro final esperado da partida.
+encontrados. `jail_decision_forecast` acrescenta distribuição aproximada de caixa,
+probabilidade de saldo negativo, chance de ainda estar preso, cartas restantes e
+oportunidades condicionais por propriedade. As hipóteses de carteira fixa e
+aproximação normal estão descritas no [guia de ambiente](ambiente.md). O forecast
+descreve cenários condicionais e não recomenda uma ação nem estima o lucro final
+da partida.

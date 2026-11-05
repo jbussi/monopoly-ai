@@ -63,7 +63,7 @@ class DecisionFeaturesEncoder:
         *,
         max_players: int = 12,
         max_alternatives: int = 128,
-        horizons: Iterable[int] = (1, 3, 5),
+        horizons: Iterable[int] = (1, 2),
     ) -> None:
         if not 2 <= max_players <= 12 or len(loop.game.turn_order) > max_players:
             raise ValueError("max_players deve cobrir a partida e estar entre 2 e 12.")

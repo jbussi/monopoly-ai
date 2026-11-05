@@ -1,10 +1,13 @@
-"""State-conditioned Monte Carlo cash-flow forecasts for property decisions."""
+"""State-conditioned analytical cash-flow forecasts using board movement probabilities."""
 
 from __future__ import annotations
 
-import hashlib
-import random
 from dataclasses import dataclass
+from collections import OrderedDict
+from math import exp, pi, sqrt
+from statistics import NormalDist
+from threading import RLock
+from time import perf_counter
 from typing import Any, Iterable
 from uuid import UUID
 
@@ -12,15 +15,17 @@ import numpy as np
 
 from app.domain.game.actions import ActionType, GameAction
 from app.domain.game.game_loop import GameLoop
-from app.envs.baselines import GreedyPolicy
+from app.domain.game.board import PropertyTile, TaxTile
 from app.infraestructure.game_config.models import GameConfig
 
 
-FORECAST_HORIZONS = (1, 3, 5)
+FORECAST_HORIZONS = (1, 2)
 FORECAST_SCENARIOS = ("buy", "decline")
 FORECAST_STAT_NAMES = ("mean", "p05", "p25", "p50", "p75", "p95")
-DEFAULT_FORECAST_SAMPLES = 32
-DEFAULT_MANAGEMENT_FORECAST_SAMPLES = 8
+# Legacy argument retained for source compatibility; these forecasts are analytic.
+# Compatibility names for callers; analytical forecasts use no samples.
+DEFAULT_FORECAST_SAMPLES = 0
+DEFAULT_MANAGEMENT_FORECAST_SAMPLES = 0
 MANAGEMENT_ACTION_TYPES = (
     ActionType.BUILD_HOUSE,
     ActionType.SELL_HOUSE,
@@ -33,9 +38,45 @@ JAIL_OPTIONS = (
     ActionType.USE_JAIL_CARD,
 )
 
+# Models cache exact dice/card outcomes by movement state. Retaining a small
+# process-local pool lets all forecasts in an episode (including cloned trade
+# scenarios) reuse that work without retaining game state or cash values.
+_MOVEMENT_MODELS: OrderedDict[tuple[int, int, int], tuple[object, object, object]] = OrderedDict()
+_MOVEMENT_MODELS_LOCK = RLock()
+_MOVEMENT_MODEL_CACHE_LIMIT = 8
+_FORECAST_STAGE_SECONDS: dict[str, float] = {}
+_FORECAST_STAGE_CALLS: dict[str, int] = {}
+_MOVEMENT_MODEL_CACHE_HITS = 0
+_MOVEMENT_MODEL_CACHE_MISSES = 0
+
+
+def forecast_stage_metrics(*, reset: bool = False) -> dict[str, float | int]:
+    """Return process-local forecast timing totals, optionally clearing them."""
+    global _MOVEMENT_MODEL_CACHE_HITS, _MOVEMENT_MODEL_CACHE_MISSES
+    result: dict[str, float | int] = {}
+    for stage, seconds in _FORECAST_STAGE_SECONDS.items():
+        result[f"forecast_{stage}_seconds"] = seconds
+        result[f"forecast_{stage}_calls"] = _FORECAST_STAGE_CALLS.get(stage, 0)
+    result["movement_model_cache_hits"] = _MOVEMENT_MODEL_CACHE_HITS
+    result["movement_model_cache_misses"] = _MOVEMENT_MODEL_CACHE_MISSES
+    if reset:
+        _FORECAST_STAGE_SECONDS.clear()
+        _FORECAST_STAGE_CALLS.clear()
+        _MOVEMENT_MODEL_CACHE_HITS = 0
+        _MOVEMENT_MODEL_CACHE_MISSES = 0
+    return result
+
+
+def _record_forecast_stage(stage: str, started: float) -> None:
+    _FORECAST_STAGE_SECONDS[stage] = (
+        _FORECAST_STAGE_SECONDS.get(stage, 0.0) + perf_counter() - started
+    )
+    _FORECAST_STAGE_CALLS[stage] = _FORECAST_STAGE_CALLS.get(stage, 0) + 1
+
 
 @dataclass(frozen=True, slots=True)
 class PropertyDecisionCashFlowForecast:
+    """Analytical cash moments and normal-approximation quantiles by scenario."""
     horizons: tuple[int, ...]
     scenario_names: tuple[str, ...]
     statistic_names: tuple[str, ...]
@@ -50,7 +91,7 @@ class PropertyDecisionCashFlowForecast:
     bankruptcy_probability: np.ndarray
 
     def as_dict(self, money_scale: float) -> dict[str, Any]:
-        """Return model-ready arrays with monetary fields normalized."""
+        """Return model-ready arrays; sample_count is zero for analytic outputs."""
         return {
             "active": np.asarray([1.0], dtype=np.float32),
             "horizons": np.asarray(self.horizons, dtype=np.float32),
@@ -66,30 +107,6 @@ class PropertyDecisionCashFlowForecast:
         }
 
 
-class _ForecastPolicy:
-    """Use the project GreedyPolicy, while keeping the declined asset unowned."""
-
-    def __init__(self, focal_player_id: UUID, declined_tile_id: int):
-        self.focal_player_id = focal_player_id
-        self.declined_tile_id = declined_tile_id
-        self.greedy = GreedyPolicy()
-
-    def __call__(self, loop: GameLoop) -> GameAction:
-        if loop.current_decision_player_id == self.focal_player_id:
-            if (
-                loop.turn_phase == GameLoop.AWAITING_PROPERTY_DECISION
-                and loop.pending_tile_id == self.declined_tile_id
-            ):
-                return GameAction(ActionType.DECLINE_PROPERTY)
-            if (
-                loop.turn_phase == GameLoop.AUCTION
-                and loop.pending_tile_id == self.declined_tile_id
-            ):
-                if loop.current_decision_player_id in loop._auction_active:
-                    return GameAction(ActionType.AUCTION_WITHDRAW)
-        return self.greedy(loop)
-
-
 def forecast_property_cash_flows(
     loop: GameLoop,
     focal_player_id: UUID,
@@ -99,13 +116,14 @@ def forecast_property_cash_flows(
     samples: int = DEFAULT_FORECAST_SAMPLES,
     legal_actions: list[GameAction] | None = None,
 ) -> PropertyDecisionCashFlowForecast:
-    """Compare buy-now with decline, simulating engine outcomes from this state.
+    """Compare buying and declining using exact movement probabilities.
 
-    Horizons count completed turns of the focal player after the current
-    property-resolution step. Every future player uses GreedyPolicy. The
-    declined branch prevents the focal player from acquiring this same
-    property later. Both branches share sample seeds for a paired comparison.
+    Ownership, development, mortgages, and player positions remain fixed
+    during the forecast. No future purchase, trade, construction, liquidation,
+    or policy decisions are modeled. Cash-flow quantiles use a normal
+    approximation from exact Markov reward moments.
     """
+    started = perf_counter()
     if loop.turn_phase != GameLoop.AWAITING_PROPERTY_DECISION or loop.pending_tile_id is None:
         raise ValueError("A previsão exige uma propriedade aguardando decisão de compra.")
     if loop.current_decision_player_id != focal_player_id:
@@ -115,9 +133,6 @@ def forecast_property_cash_flows(
         for horizon in horizons
     ):
         raise ValueError("horizons deve conter inteiros positivos em ordem crescente, sem repetição.")
-    if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
-        raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
-
     tile_id = loop.pending_tile_id
     available_actions = loop.legal_actions() if legal_actions is None else legal_actions
     legal_types = {action.action_type for action in available_actions}
@@ -125,38 +140,25 @@ def forecast_property_cash_flows(
         ActionType.BUY_PROPERTY in legal_types,
         ActionType.DECLINE_PROPERTY in legal_types,
     )
-    base_seed = _state_seed(loop, focal_player_id, tile_id)
-    scenario_samples: list[list[dict[str, np.ndarray]]] = [[], []]
-    paired_seeds = [
-        (base_seed + sample_index * 0x9E3779B97F4A7C15) & ((1 << 64) - 1)
-        for sample_index in range(samples)
-    ]
-
-    for seed in paired_seeds:
-        for scenario_index, action in enumerate((
-            GameAction(ActionType.BUY_PROPERTY),
-            GameAction(ActionType.DECLINE_PROPERTY),
-        )):
-            if not option_available[scenario_index]:
-                scenario_samples[scenario_index].append(_empty_path(len(horizons)))
-                continue
-            path = _simulate_branch(
-                loop,
-                focal_player_id,
-                tile_id,
-                action,
-                config,
-                horizons,
-                seed,
-            )
-            scenario_samples[scenario_index].append(path)
-
-    return _summarize(
-        horizons,
-        samples,
-        option_available,
-        scenario_samples,
-    )
+    branches: list[dict[str, np.ndarray]] = []
+    movement_model = _movement_model(loop, config)
+    for index, action_type in enumerate((ActionType.BUY_PROPERTY, ActionType.DECLINE_PROPERTY)):
+        if not option_available[index]:
+            branches.append(_empty_analytic_path(len(horizons)))
+            continue
+        branch = loop.clone()
+        if action_type == ActionType.BUY_PROPERTY:
+            applied = branch.process_action(GameAction(action_type))
+            if applied["status"] != "SUCCESS":
+                raise RuntimeError(f"Não foi possível aplicar a compra ao forecast: {applied}.")
+        branches.append(_analytic_cash_path(
+            branch, focal_player_id, config, horizons,
+            starting_cash=loop.game.player_states[focal_player_id].money,
+            movement_model=movement_model,
+        ))
+    forecast = _combine_analytic_paths(horizons, option_available, branches)
+    _record_forecast_stage("property_cash", started)
+    return forecast
 
 
 def empty_cash_flow_forecast() -> dict[str, np.ndarray]:
@@ -186,42 +188,293 @@ def forecast_management_cash_flows(
     samples: int = DEFAULT_MANAGEMENT_FORECAST_SAMPLES,
     legal_actions: list[GameAction] | None = None,
 ) -> dict[tuple[str, int], PropertyDecisionCashFlowForecast]:
-    """Forecast each legal property-management action against deferring it once."""
+    """Compare each legal management action with leaving the current state intact."""
     if loop.current_decision_player_id != focal_player_id:
         return {}
-    if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
-        raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
     legal_actions = loop.legal_actions() if legal_actions is None else legal_actions
     candidates = [
         action for action in legal_actions
         if action.action_type in MANAGEMENT_ACTION_TYPES
         and isinstance(action.payload.get("tile_id"), int)
     ]
+    started = perf_counter()
     result: dict[tuple[str, int], PropertyDecisionCashFlowForecast] = {}
+    movement_model = _movement_model(loop, config)
+    # The reference state is invariant across candidates; calculating it once
+    # avoids repeating the largest shared branch in every action comparison.
+    baseline = _analytic_cash_path(
+        loop, focal_player_id, config, FORECAST_HORIZONS,
+        movement_model=movement_model,
+    )
     for candidate in candidates:
-        deferred = _defer_management_action(loop, candidate, legal_actions)
-        base_seed = _state_seed(loop, focal_player_id, candidate.payload["tile_id"])
-        base_seed ^= int.from_bytes(candidate.action_type.encode("utf-8"), "little")
-        paths_by_scenario: list[list[dict[str, np.ndarray]]] = [[], []]
-        for sample_index in range(samples):
-            seed = (base_seed + sample_index * 0x9E3779B97F4A7C15) & ((1 << 64) - 1)
-            for branch_index, first_action in enumerate((candidate, deferred)):
-                paths_by_scenario[branch_index].append(_simulate_branch(
-                    loop,
-                    focal_player_id,
-                    -1,
-                    first_action,
-                    config,
-                    FORECAST_HORIZONS,
-                    seed,
-                ))
-        result[(candidate.action_type, candidate.payload["tile_id"])] = _summarize(
-            FORECAST_HORIZONS,
-            samples,
-            (True, True),
-            paths_by_scenario,
+        changed = loop.clone()
+        applied = changed.process_action(candidate)
+        if applied["status"] != "SUCCESS":
+            continue
+        paths = [
+            _analytic_cash_path(
+                changed, focal_player_id, config, FORECAST_HORIZONS,
+                starting_cash=loop.game.player_states[focal_player_id].money,
+                movement_model=movement_model,
+            ),
+            baseline,
+        ]
+        result[(candidate.action_type, candidate.payload["tile_id"])] = _combine_analytic_paths(
+            FORECAST_HORIZONS, (True, True), paths
         )
+    _record_forecast_stage("management_cash", started)
     return result
+
+
+def _analytic_cash_path(
+    loop: GameLoop,
+    focal_player_id: UUID,
+    config: GameConfig,
+    horizons: tuple[int, ...],
+    *,
+    starting_cash: int | None = None,
+    movement_model: MonopolyBoardModel | None = None,
+) -> dict[str, np.ndarray]:
+    """Propagate exact movement probabilities and summarize cash-flow moments.
+
+    Movement and configured card draws are represented by the finite Markov
+    model. Current ownership, buildings, and mortgages are held fixed. The
+    reported cash quantiles use a normal approximation to the exact first two
+    reward moments; future debt-resolution choices are intentionally absent.
+    """
+    started = perf_counter()
+    from app.domain.analytics.markov.stationary_board import MonopolyMovementState
+
+    game = loop.game
+    starting_cash = (
+        game.player_states[focal_player_id].money
+        if starting_cash is None else int(starting_cash)
+    )
+    initial_delta = game.player_states[focal_player_id].money - starting_cash
+    active_ids = tuple(game.active_player_ids)
+    model = movement_model or _movement_model(loop, config)
+    kernel_cache: dict[tuple[UUID, MonopolyMovementState], dict] = {}
+
+    def cash_reward(mover_id: UUID, outcome: MonopolyMovementOutcome) -> float:
+        reward = 0.0
+        player_is_focal = mover_id == focal_player_id
+        if player_is_focal:
+            reward += outcome.go_salary_count * loop.rules.go_salary
+            reward += outcome.player_cash_delta
+            if outcome.repair_house_cost or outcome.repair_hotel_cost:
+                for property_tile in game.owned_tiles(focal_player_id):
+                    level = game.property_states[property_tile.tile_id].houses
+                    if level == 5:
+                        reward -= outcome.repair_hotel_cost
+                    else:
+                        reward -= level * outcome.repair_house_cost
+        else:
+            reward += outcome.other_player_cash_delta
+
+        if outcome.landing_position is None:
+            return reward
+        tile = game.board.get_tile(outcome.landing_position)
+        if isinstance(tile, PropertyTile):
+            property_state = game.property_states[tile.tile_id]
+            owner_id = property_state.owner_id
+            if owner_id is not None and not property_state.is_mortgaged:
+                rent = game.rent_for(tile, int(outcome.rent_dice_total))
+                rent = int(round(rent * outcome.rent_multiplier))
+                if player_is_focal and owner_id != mover_id:
+                    reward -= rent
+                elif not player_is_focal and owner_id == focal_player_id:
+                    reward += rent
+        elif player_is_focal and isinstance(tile, TaxTile):
+            amount = tile.tax_amount
+            if tile.percent_option is not None and loop.rules.income_tax_choice:
+                amount = min(
+                    amount,
+                    game.net_worth(focal_player_id) * tile.percent_option // 100,
+                )
+            reward -= amount
+        return reward
+
+    def turn_kernel(mover_id: UUID, state: MonopolyMovementState) -> dict:
+        """Map a start-of-turn movement state to end states and reward moments."""
+        key = (mover_id, state)
+        cached = kernel_cache.get(key)
+        if cached is not None:
+            return cached
+        weighted: dict[MonopolyMovementState, list[float]] = {}
+        for outcome in model.outcomes_from(state):
+            reward = cash_reward(mover_id, outcome)
+            if outcome.turn_ended:
+                branches = ((outcome.state, 1.0, reward, reward * reward),)
+            else:
+                continuation = turn_kernel(mover_id, outcome.state)
+                branches = tuple(
+                    (end_state, probability,
+                     reward + mean,
+                     reward * reward + 2.0 * reward * mean + second)
+                    for end_state, (probability, mean, second) in continuation.items()
+                )
+            for end_state, probability, mean, second in branches:
+                mass = outcome.probability * probability
+                aggregate = weighted.setdefault(end_state, [0.0, 0.0, 0.0])
+                aggregate[0] += mass
+                aggregate[1] += mass * mean
+                aggregate[2] += mass * second
+        result = {
+            end_state: (mass, first / mass, second / mass)
+            for end_state, (mass, first, second) in weighted.items()
+            if mass > 0
+        }
+        kernel_cache[key] = result
+        return result
+
+    total_means = np.zeros(len(horizons), dtype=np.float64)
+    total_variances = np.zeros(len(horizons), dtype=np.float64)
+    focal_jail_probability = np.zeros(len(horizons), dtype=np.float64)
+    for player_id in active_ids:
+        player = game.player_states[player_id]
+        if player.is_bankrupt:
+            continue
+        start = MonopolyMovementState(
+            position=game.position_of(player_id),
+            in_jail=player.is_in_jail,
+            jail_attempts=min(player.jail_turns, model.max_jail_attempts - 1) if player.is_in_jail else 0,
+            doubles_streak=0,
+        )
+        # State values are probability mass, weighted first moment, and
+        # weighted second moment of this player's cumulative contribution.
+        distribution = {start: (1.0, 0.0, 0.0)}
+        for turn_index in range(max(horizons)):
+            next_distribution: dict[MonopolyMovementState, list[float]] = {}
+            for source_state, (mass, first, second) in distribution.items():
+                for end_state, (probability, reward_mean, reward_second) in turn_kernel(
+                    player_id, source_state
+                ).items():
+                    target = next_distribution.setdefault(end_state, [0.0, 0.0, 0.0])
+                    target[0] += mass * probability
+                    target[1] += probability * (first + mass * reward_mean)
+                    target[2] += probability * (
+                        second + 2.0 * first * reward_mean + mass * reward_second
+                    )
+            distribution = {
+                state: tuple(values) for state, values in next_distribution.items()
+            }
+            if turn_index + 1 in horizons:
+                horizon_index = horizons.index(turn_index + 1)
+                total_means[horizon_index] += sum(values[1] for values in distribution.values())
+                raw_second = sum(values[2] for values in distribution.values())
+                player_mean = sum(values[1] for values in distribution.values())
+                total_variances[horizon_index] += max(0.0, raw_second - player_mean**2)
+                if player_id == focal_player_id:
+                    focal_jail_probability[horizon_index] = sum(
+                        values[0] for state, values in distribution.items() if state.in_jail
+                    )
+
+    result = {name: np.zeros((len(horizons), len(FORECAST_STAT_NAMES)), dtype=np.float64)
+              for name in ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash")}
+    result["cash_mean"] = np.zeros(len(horizons), dtype=np.float64)
+    result["cash_variance"] = np.zeros(len(horizons), dtype=np.float64)
+    debt_probability = np.zeros(len(horizons), dtype=np.float64)
+    existing_debt = any(debt.debtor_id == focal_player_id for debt in game.debts)
+    base_change = initial_delta
+    for index, horizon in enumerate(horizons):
+        mean = base_change + total_means[index]
+        variance = total_variances[index]
+        sigma = sqrt(variance)
+        result["cash_mean"][index] = mean
+        result["cash_variance"][index] = variance
+        change_stats = _normal_summary(mean, sigma)
+        ending_mean = starting_cash + mean
+        ending_stats = _normal_summary(ending_mean, sigma)
+        result["cash_change"][index] = change_stats
+        result["ending_cash"][index] = ending_stats
+        result["cash_in"][index] = _positive_part_summary(mean, sigma)
+        # Preserve immediate spending (for example, a property's purchase
+        # price) as a cash outlay even when later income offsets it.
+        immediate_outlay = max(0.0, -float(initial_delta))
+        result["cash_out"][index] = immediate_outlay + _positive_part_summary(
+            -total_means[index], sigma
+        )
+        result["minimum_cash"][index] = np.minimum(ending_stats, starting_cash)
+        debt_probability[index] = max(
+            float(existing_debt),
+            _normal_cdf((0.0 - ending_mean) / sigma) if sigma else float(ending_mean < 0),
+        )
+    result["debt"] = debt_probability
+    result["bankruptcy"] = np.zeros(len(horizons), dtype=np.float64)
+    result["in_jail"] = focal_jail_probability
+    _record_forecast_stage("cash_path", started)
+    return result
+
+
+def _movement_model(loop: GameLoop, config: GameConfig) -> MonopolyBoardModel:
+    """Get the cached exact movement model for this config/rule combination."""
+    global _MOVEMENT_MODEL_CACHE_HITS, _MOVEMENT_MODEL_CACHE_MISSES
+    from app.domain.analytics.markov.stationary_board import MonopolyBoardModel
+    player_count = max(2, len(loop.game.active_player_ids))
+    key = (id(config), id(loop.rules), player_count)
+    with _MOVEMENT_MODELS_LOCK:
+        cached = _MOVEMENT_MODELS.get(key)
+        if cached is not None and cached[0] is config and cached[1] is loop.rules:
+            _MOVEMENT_MODEL_CACHE_HITS += 1
+            _MOVEMENT_MODELS.move_to_end(key)
+            return cached[2]
+        _MOVEMENT_MODEL_CACHE_MISSES += 1
+        model = MonopolyBoardModel(
+            config, loop.rules, number_of_players=player_count
+        )
+        _MOVEMENT_MODELS[key] = (config, loop.rules, model)
+        _MOVEMENT_MODELS.move_to_end(key)
+        while len(_MOVEMENT_MODELS) > _MOVEMENT_MODEL_CACHE_LIMIT:
+            _MOVEMENT_MODELS.popitem(last=False)
+        return model
+
+
+def _normal_summary(mean: float, sigma: float) -> np.ndarray:
+    if sigma <= 1e-12:
+        return np.full(len(FORECAST_STAT_NAMES), mean, dtype=np.float64)
+    normal = NormalDist()
+    return np.asarray(
+        [mean, *(mean + sigma * normal.inv_cdf(q) for q in (0.05, 0.25, 0.50, 0.75, 0.95))],
+        dtype=np.float64,
+    )
+
+
+def _normal_cdf(value: float) -> float:
+    return NormalDist().cdf(value)
+
+
+def _positive_part_summary(mean: float, sigma: float) -> np.ndarray:
+    """Distribution summary for max(X, 0), where X is approximately normal."""
+    if sigma <= 1e-12:
+        return np.full(len(FORECAST_STAT_NAMES), max(0.0, mean), dtype=np.float64)
+    normal = NormalDist()
+    positive_quantiles = np.maximum(
+        0.0,
+        np.asarray([mean + sigma * normal.inv_cdf(q) for q in (0.05, 0.25, 0.50, 0.75, 0.95)]),
+    )
+    z = mean / sigma
+    density = exp(-0.5 * z * z) / sqrt(2.0 * pi)
+    expected = sigma * density + mean * normal.cdf(z)
+    return np.asarray([expected, *positive_quantiles], dtype=np.float64)
+
+
+def _combine_analytic_paths(horizons, option_available, paths):
+    fields = ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash")
+    summarized = {name: np.stack([path[name] for path in paths], axis=0) for name in fields}
+    return PropertyDecisionCashFlowForecast(
+        horizons=tuple(horizons),
+        scenario_names=FORECAST_SCENARIOS,
+        statistic_names=FORECAST_STAT_NAMES,
+        sample_count=0,
+        option_available=tuple(option_available),
+        cash_change=summarized["cash_change"],
+        cash_in=summarized["cash_in"],
+        cash_out=summarized["cash_out"],
+        ending_cash=summarized["ending_cash"],
+        minimum_cash=summarized["minimum_cash"],
+        debt_probability=np.stack([path["debt"] for path in paths], axis=0),
+        bankruptcy_probability=np.stack([path["bankruptcy"] for path in paths], axis=0),
+    )
 
 
 def forecast_jail_decisions(
@@ -232,16 +485,16 @@ def forecast_jail_decisions(
     samples: int = DEFAULT_FORECAST_SAMPLES,
     legal_actions: list[GameAction] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Compare jail choices, cash trajectories, and future unowned-property chances."""
+    """Compare jail choices with fixed-state Markov cash-flow projections."""
+    started = perf_counter()
+    from app.domain.analytics.markov.stationary_board import MonopolyMovementState
+
     if (
         loop.turn_phase != GameLoop.BEFORE_ROLL
         or loop.current_decision_player_id != focal_player_id
         or not loop.game.player_states[focal_player_id].is_in_jail
     ):
         raise ValueError("A previsão de prisão exige que o jogador atual esteja preso antes da rolagem.")
-    if not isinstance(samples, int) or isinstance(samples, bool) or samples < 2:
-        raise ValueError("samples deve ser um inteiro maior ou igual a 2.")
-
     available_actions = loop.legal_actions() if legal_actions is None else legal_actions
     legal_kinds = {action.action_type for action in available_actions}
     available = np.asarray([kind in legal_kinds for kind in JAIL_OPTIONS], dtype=bool)
@@ -249,44 +502,45 @@ def forecast_jail_decisions(
         tile.tile_id for tile in loop.game.board.property_tiles
         if loop.game.property_states[tile.tile_id].owner_id is None
     )
-    base_seed = _state_seed(loop, focal_player_id, -2)
-    scenario_paths: list[list[dict[str, np.ndarray]]] = [[] for _ in JAIL_OPTIONS]
-    seeds = [
-        (base_seed + index * 0x9E3779B97F4A7C15) & ((1 << 64) - 1)
-        for index in range(samples)
-    ]
-    for seed in seeds:
-        for option_index, kind in enumerate(JAIL_OPTIONS):
-            if not available[option_index]:
-                scenario_paths[option_index].append(_empty_jail_path(len(property_ids)))
-                continue
-            scenario_paths[option_index].append(_simulate_branch(
-                loop,
-                focal_player_id,
-                -2,
-                GameAction(kind),
-                config,
-                FORECAST_HORIZONS,
-                seed,
-                tracked_property_ids=property_ids,
-            ))
+    model = _movement_model(loop, config)
+    start_cash = loop.game.player_states[focal_player_id].money
+    paths: list[dict[str, np.ndarray]] = []
+    branches: list[GameLoop] = []
+    for option_index, kind in enumerate(JAIL_OPTIONS):
+        if not available[option_index]:
+            branches.append(loop)
+            paths.append(_empty_analytic_path(len(FORECAST_HORIZONS)))
+            paths[-1].update({
+                "in_jail": np.zeros(len(FORECAST_HORIZONS), dtype=np.float64),
+                "jail_cards": np.zeros(len(FORECAST_HORIZONS), dtype=np.float64),
+            })
+            continue
+        branch = loop.clone()
+        if kind != ActionType.ROLL_DICE:
+            applied = branch.process_action(GameAction(kind))
+            if applied["status"] != "SUCCESS":
+                raise RuntimeError(f"Ação de prisão rejeitada no forecast: {applied}.")
+        branches.append(branch)
+        path = _analytic_cash_path(
+            branch, focal_player_id, config, FORECAST_HORIZONS,
+            starting_cash=start_cash,
+            movement_model=model,
+        )
+        state = branch.game.player_states[focal_player_id]
+        path["jail_cards"] = np.full(
+            len(FORECAST_HORIZONS), len(state.jail_cards), dtype=np.float64
+        )
+        paths.append(path)
 
     shape = (len(JAIL_OPTIONS), len(FORECAST_HORIZONS), len(FORECAST_STAT_NAMES))
     result: dict[str, np.ndarray] = {
         "active": np.ones(1, dtype=np.float32),
         "horizons": np.asarray(FORECAST_HORIZONS, dtype=np.float32),
         "option_available": available.astype(np.float32),
-        "sample_count": np.asarray([samples], dtype=np.float32),
+        "sample_count": np.zeros(1, dtype=np.float32),
     }
     for field in ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash"):
-        distributions = np.zeros(shape, dtype=np.float64)
-        for option_index, paths in enumerate(scenario_paths):
-            values = np.stack([path[field] for path in paths], axis=0)
-            distributions[option_index, :, 0] = values.mean(axis=0)
-            distributions[option_index, :, 1:] = np.quantile(
-                values, (0.05, 0.25, 0.50, 0.75, 0.95), axis=0
-            ).T
-        result[field] = distributions.astype(np.float32)
+        result[field] = np.stack([path[field] for path in paths], axis=0).astype(np.float32)
 
     for field, path_field in (
         ("debt_probability", "debt"),
@@ -294,289 +548,97 @@ def forecast_jail_decisions(
         ("in_jail_probability", "in_jail"),
         ("jail_cards_remaining", "jail_cards"),
     ):
-        values = np.zeros((len(JAIL_OPTIONS), len(FORECAST_HORIZONS)), dtype=np.float64)
-        for option_index, paths in enumerate(scenario_paths):
-            values[option_index] = np.stack(
-                [path[path_field] for path in paths], axis=0
-            ).mean(axis=0)
+        values = np.stack([path[path_field] for path in paths], axis=0)
         result[field] = values.astype(np.float32)
 
     result["unowned_property_probability"] = np.zeros(
         (len(JAIL_OPTIONS), len(FORECAST_HORIZONS), len(property_ids)), dtype=np.float32
     )
-    for option_index, paths in enumerate(scenario_paths):
-        if property_ids:
-            result["unowned_property_probability"][option_index] = np.stack(
-                [path["opportunity_hits"] for path in paths], axis=0
-            ).mean(axis=0).astype(np.float32)
+    for option_index, branch in enumerate(branches):
+        if not available[option_index] or not property_ids:
+            continue
+        player = branch.game.player_states[focal_player_id]
+        start = MonopolyMovementState(
+            position=branch.game.position_of(focal_player_id),
+            in_jail=player.is_in_jail,
+            jail_attempts=min(player.jail_turns, model.max_jail_attempts - 1) if player.is_in_jail else 0,
+            doubles_streak=0,
+        )
+        property_positions = {
+            tile_id: branch.game.board._position_by_id[tile_id]
+            for tile_id in property_ids
+        }
+        result["unowned_property_probability"][option_index] = np.asarray([
+            [
+                np.clip(
+                    1.0 - _probability_no_landing(
+                        model, start, property_positions[tile_id], horizon
+                    ),
+                    0.0,
+                    1.0,
+                )
+                for tile_id in property_ids
+            ]
+            for horizon in FORECAST_HORIZONS
+        ], dtype=np.float32)
     result["unowned_property_ids"] = np.asarray(property_ids, dtype=np.int32)
+    _record_forecast_stage("jail_cash", started)
     return result
 
 
-def _defer_management_action(
-    loop: GameLoop,
-    candidate: GameAction,
-    legal: list[GameAction],
-) -> GameAction:
-    other_management = [
-        action for action in legal
-        if action.action_type in MANAGEMENT_ACTION_TYPES
-        and action != candidate
-    ]
-    preferred = {
-        GameLoop.BEFORE_ROLL: (ActionType.ROLL_DICE,),
-        GameLoop.AFTER_ROLL: (ActionType.END_TURN,),
-        GameLoop.RESOLVE_DEBT: (
-            ActionType.END_DEBT_NEGOTIATIONS,
-            ActionType.AUCTION_DEBT_PROPERTY,
-            ActionType.DECLARE_BANKRUPTCY,
-        ),
-    }.get(loop.turn_phase, ())
-    for kind in preferred:
-        for action in legal:
-            if action.action_type == kind and action != candidate:
-                return action
-    if other_management:
-        return other_management[0]
-    alternatives = [action for action in legal if action != candidate]
-    if alternatives:
-        return alternatives[0]
-    raise ValueError(f"Não há ação legal para adiar {candidate.action_type}.")
-
-
-def _simulate_branch(
-    source: GameLoop,
-    focal_player_id: UUID,
+def _probability_no_landing(
+    model: MonopolyBoardModel,
+    start: MonopolyMovementState,
     tile_id: int,
-    first_action: GameAction,
-    config: GameConfig,
-    horizons: tuple[int, ...],
-    seed: int,
-    tracked_property_ids: tuple[int, ...] = (),
-) -> dict[str, np.ndarray]:
-    loop = source.clone()
-    _prepare_determinization(loop, config, seed)
-    loop.game.record_events = False
-    loop.game.history_logs.clear()
-    initial_cash = loop.game.player_states[focal_player_id].money
-    cash_in = 0.0
-    cash_out = 0.0
-    minimum_cash = float(initial_cash)
-    debt_seen = any(debt.debtor_id == focal_player_id for debt in loop.game.debts)
-    bankruptcy_seen = loop.game.player_states[focal_player_id].is_bankrupt
-    opportunity_seen: set[int] = set()
-    completed_focal_turns = 0
-    snapshots: dict[int, dict[str, float]] = {}
-    max_actions = max(horizons) * max(100, len(loop.game.turn_order) * 50)
+    turns: int,
+) -> float:
+    """Return the exact chance of avoiding one unowned tile through N turns."""
+    cache: dict[MonopolyMovementState, dict[MonopolyMovementState, float]] = {}
 
-    def record_property_opportunity() -> None:
-        """Record an unowned tracked tile offered to the forecast player."""
-        if (
-            tracked_property_ids
-            and loop.current_decision_player_id == focal_player_id
-            and loop.turn_phase == GameLoop.AWAITING_PROPERTY_DECISION
-            and loop.pending_tile_id in tracked_property_ids
-            and loop.game.property_states[loop.pending_tile_id].owner_id is None
-        ):
-            opportunity_seen.add(loop.pending_tile_id)
+    def no_hit_turn(state: MonopolyMovementState) -> dict[MonopolyMovementState, float]:
+        if state in cache:
+            return cache[state]
+        output: dict[MonopolyMovementState, float] = {}
+        for outcome in model.outcomes_from(state):
+            if outcome.landing_position == tile_id:
+                continue
+            if outcome.turn_ended:
+                continuations = {outcome.state: 1.0}
+            else:
+                continuations = no_hit_turn(outcome.state)
+            for target, probability in continuations.items():
+                output[target] = output.get(target, 0.0) + outcome.probability * probability
+        cache[state] = output
+        return output
 
-    def snapshot() -> dict[str, Any]:
-        """Capture forecast metrics for the current simulated horizon."""
-        state = loop.game.player_states[focal_player_id]
-        return {
-            "cash_change": float(state.money - initial_cash),
-            "cash_in": cash_in,
-            "cash_out": cash_out,
-            "ending_cash": float(state.money),
-            "minimum_cash": minimum_cash,
-            "debt": float(debt_seen),
-            "bankruptcy": float(bankruptcy_seen or state.is_bankrupt),
-            "in_jail": float(state.is_in_jail),
-            "jail_cards": float(len(state.jail_cards)),
-            "opportunity_hits": np.asarray(
-                [float(tile_id in opportunity_seen) for tile_id in tracked_property_ids],
-                dtype=np.float64,
-            ),
-        }
+    distribution = {start: 1.0}
+    for _ in range(turns):
+        next_distribution: dict[MonopolyMovementState, float] = {}
+        for state, mass in distribution.items():
+            for target, probability in no_hit_turn(state).items():
+                next_distribution[target] = next_distribution.get(target, 0.0) + mass * probability
+        distribution = next_distribution
+    return sum(distribution.values())
 
-    action_result = loop.process_action(first_action)
-    if action_result["status"] != "SUCCESS":
-        raise RuntimeError(f"Ação inicial de previsão rejeitada: {action_result.get('reason')}.")
-    cash = loop.game.player_states[focal_player_id].money
-    delta = cash - initial_cash
-    cash_in += max(0, delta)
-    cash_out += max(0, -delta)
-    minimum_cash = min(minimum_cash, float(cash))
-    debt_seen |= any(debt.debtor_id == focal_player_id for debt in loop.game.debts)
-    bankruptcy_seen |= loop.game.player_states[focal_player_id].is_bankrupt
 
-    policy = _ForecastPolicy(focal_player_id, tile_id)
-    next_horizon_index = 0
-    for _ in range(max_actions):
-        if loop.game.game_over or loop.game.truncated:
-            break
-        record_property_opportunity()
-        turn_counter_before = loop.game.turn_counter
-        turn_owner_before = loop.game.current_player_id
-        cash_before = loop.game.player_states[focal_player_id].money
-        action = policy(loop)
-        result = loop.process_action(action)
-        if result["status"] != "SUCCESS":
-            # A baseline can have stale assumptions only if the engine phase
-            # changed unexpectedly; stop this trajectory at its last valid state.
-            break
-
-        cash_after = loop.game.player_states[focal_player_id].money
-        delta = cash_after - cash_before
-        cash_in += max(0, delta)
-        cash_out += max(0, -delta)
-        minimum_cash = min(minimum_cash, float(cash_after))
-        debt_seen |= any(debt.debtor_id == focal_player_id for debt in loop.game.debts)
-        bankruptcy_seen |= loop.game.player_states[focal_player_id].is_bankrupt
-        if (
-            turn_owner_before == focal_player_id
-            and
-            loop.game.turn_counter > turn_counter_before
-        ):
-            completed_focal_turns += 1
-
-        while (
-            next_horizon_index < len(horizons)
-            and completed_focal_turns >= horizons[next_horizon_index]
-        ):
-            snapshots[horizons[next_horizon_index]] = snapshot()
-            next_horizon_index += 1
-
-        # Every requested result is fixed once the last horizon is recorded.
-        # Continuing until the episode ends wastes hundreds of engine actions
-        # per Monte Carlo path and cannot change any forecast value.
-        if next_horizon_index == len(horizons):
-            break
-
-    final = snapshot()
-    for horizon in horizons:
-        snapshots.setdefault(horizon, final)
+def _empty_analytic_path(horizon_count: int) -> dict[str, np.ndarray]:
+    shape = (horizon_count, len(FORECAST_STAT_NAMES))
     return {
-        name: np.asarray([snapshots[horizon][name] for horizon in horizons], dtype=np.float64)
-        for name in ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash", "debt", "bankruptcy")
+        name: np.zeros(shape, dtype=np.float64)
+        for name in ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash")
     } | {
-        name: np.asarray([snapshots[horizon][name] for horizon in horizons], dtype=np.float64)
-        for name in ("in_jail", "jail_cards")
-    } | {
-        "opportunity_hits": np.stack(
-            [snapshots[horizon]["opportunity_hits"] for horizon in horizons], axis=0
-        ),
+        "debt": np.zeros(horizon_count, dtype=np.float64),
+        "bankruptcy": np.zeros(horizon_count, dtype=np.float64),
     }
 
 
-def _prepare_determinization(loop: GameLoop, config: GameConfig, seed: int) -> None:
-    dice_rng = getattr(loop.game.dice, "_rng", None)
-    if dice_rng is not None:
-        dice_rng.seed(seed)
-    held: dict[str, set[str]] = {name: set() for name in ("chance", "community_chest")}
-    for player_state in loop.game.player_states.values():
-        for deck_name, card in player_state.jail_cards:
-            held.setdefault(deck_name, set()).add(card.id)
-
-    source_cards = {
-        "chance": config.chance_cards,
-        "community_chest": config.community_chest_cards,
-    }
-    for index, deck_name in enumerate(("chance", "community_chest")):
-        deck = loop.game.decks[deck_name]
-        # Reconstruct the known deck composition without consulting its hidden order.
-        deck._cards = [card for card in source_cards[deck_name] if card.id not in held[deck_name]]
-        deck._discard_pile = []
-        deck._rng.seed(seed + index + 1)
-        deck.shuffle()
-
-
-def _summarize(horizons, sample_count, option_available, samples_by_scenario):
-    statistic_fields = ("cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash")
-    summarized: dict[str, np.ndarray] = {}
-    for field in statistic_fields:
-        values = np.zeros((2, len(horizons), len(FORECAST_STAT_NAMES)), dtype=np.float64)
-        for scenario_index, paths in enumerate(samples_by_scenario):
-            sample_values = np.stack([path[field] for path in paths], axis=0)
-            values[scenario_index, :, 0] = sample_values.mean(axis=0)
-            values[scenario_index, :, 1:] = np.quantile(
-                sample_values, (0.05, 0.25, 0.50, 0.75, 0.95), axis=0
-            ).T
-        summarized[field] = values
-
-    debt_probability = np.zeros((2, len(horizons)), dtype=np.float64)
-    bankruptcy_probability = np.zeros_like(debt_probability)
-    for scenario_index, paths in enumerate(samples_by_scenario):
-        debt_probability[scenario_index] = np.stack(
-            [path["debt"] for path in paths], axis=0
-        ).mean(axis=0)
-        bankruptcy_probability[scenario_index] = np.stack(
-            [path["bankruptcy"] for path in paths], axis=0
-        ).mean(axis=0)
-
-    return PropertyDecisionCashFlowForecast(
-        horizons=horizons,
-        scenario_names=FORECAST_SCENARIOS,
-        statistic_names=FORECAST_STAT_NAMES,
-        sample_count=sample_count,
-        option_available=option_available,
-        cash_change=summarized["cash_change"],
-        cash_in=summarized["cash_in"],
-        cash_out=summarized["cash_out"],
-        ending_cash=summarized["ending_cash"],
-        minimum_cash=summarized["minimum_cash"],
-        debt_probability=debt_probability,
-        bankruptcy_probability=bankruptcy_probability,
-    )
-
-
-def _empty_path(horizon_count: int) -> dict[str, np.ndarray]:
-    zeros = np.zeros(horizon_count, dtype=np.float64)
-    return {name: zeros.copy() for name in (
-        "cash_change", "cash_in", "cash_out", "ending_cash", "minimum_cash", "debt", "bankruptcy"
-    )}
-
-
-def _empty_jail_path(property_count: int) -> dict[str, np.ndarray]:
-    path = _empty_path(len(FORECAST_HORIZONS))
-    path.update({
-        "in_jail": np.zeros(len(FORECAST_HORIZONS), dtype=np.float64),
-        "jail_cards": np.zeros(len(FORECAST_HORIZONS), dtype=np.float64),
-        "opportunity_hits": np.zeros((len(FORECAST_HORIZONS), property_count), dtype=np.float64),
-    })
-    return path
-
-
-def _state_seed(loop: GameLoop, focal_player_id: UUID, tile_id: int) -> int:
-    game = loop.game
-    public_state = (
-        focal_player_id.hex,
-        tile_id,
-        game.turn_counter,
-        loop.turn_phase,
-        tuple((pid.hex, game.player_states[pid].money, game.player_states[pid].is_in_jail,
-               game.player_states[pid].jail_turns, game.player_states[pid].is_bankrupt,
-               game.position_of(pid)) for pid in game.turn_order),
-        tuple((tile_id, prop.owner_id.hex if prop.owner_id else None, prop.houses, prop.is_mortgaged)
-              for tile_id, prop in sorted(game.property_states.items())),
-        tuple((deck_name, tuple(sorted(card.id for card in cards)))
-              for deck_name, cards in sorted(
-                  (name, [card for card in (*deck._cards, *deck._discard_pile)])
-                  for name, deck in game.decks.items()
-              )),
-    )
-    digest = hashlib.blake2b(repr(public_state).encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(digest, "big")
-
-
-DEFAULT_HORIZONS = (1, 3, 5)
-DEFAULT_SIMULATIONS = 64
-MAX_ACTIONS_PER_TURN = 128
+DEFAULT_HORIZONS = (1, 2)
+DEFAULT_SIMULATIONS = 0
 
 
 @dataclass(frozen=True, slots=True)
 class CashFlowHorizonForecast:
-    """Empirical cash-flow distribution for one forecast horizon."""
+    """Normal-approximation cash-flow distribution for one forecast horizon."""
 
     horizon_rounds: int
     requested_turns: int
@@ -591,6 +653,7 @@ class CashFlowHorizonForecast:
     p90_ending_cash: float
     bankruptcy_probability: float
     game_over_probability: float
+    # Empty for analytic forecasts; retained in the public record for compatibility.
     net_cash_flow_samples: tuple[int, ...]
     ending_cash_samples: tuple[int, ...]
     bankrupt_samples: tuple[bool, ...]
@@ -599,7 +662,7 @@ class CashFlowHorizonForecast:
 
 @dataclass(frozen=True, slots=True)
 class CashFlowForecast:
-    """Forecast for one player, with all players following GreedyPolicy."""
+    """Fixed-holdings Markov forecast for one player."""
 
     player_id: UUID
     seed: int
@@ -621,25 +684,26 @@ def forecast_cash_flow(
     loop: GameLoop,
     player_id: UUID,
     *,
+    config: GameConfig,
     horizons: Iterable[int] = DEFAULT_HORIZONS,
     simulations: int = DEFAULT_SIMULATIONS,
     seed: int | None = None,
     greedy_reserve: int = 150,
     initial_action: GameAction | None = None,
 ) -> CashFlowForecast:
-    """Estimate the player's liquid-cash outcomes under greedy self-play.
+    """Forecast cash flow from Markov movement probabilities and fixed holdings.
 
-    The current game is cloned for each simulation, so the caller's game state
-    is not changed. Built-in dice and deck RNGs are independently reseeded for
-    every scenario; reusing ``seed`` with the same state reproduces the result.
-
-    A round is one completed turn per player active at the start of this
-    forecast. If a scenario ends before its horizon, the terminal state is used
-    for that horizon and later ones. A bankrupt player has zero cash thereafter.
+    The ``simulations``, ``seed``, and ``greedy_reserve`` arguments remain for
+    source compatibility but do not affect this analytic forecast. Ownership,
+    development, and mortgages are fixed after the optional immediate action.
+    The movement transition is exact for the configured dice/card model; cash
+    quantiles are a normal approximation from its exact first two moments.
+    ``simulations`` in the returned object is zero and empirical sample tuples
+    are empty. Bankruptcy is not projected because no future debt decisions are
+    modeled; negative-cash exposure is reported separately as debt probability.
     """
+    started = perf_counter()
     horizon_values = _validate_horizons(horizons)
-    _validate_positive_integer("simulations", simulations)
-    _validate_positive_integer("greedy_reserve", greedy_reserve, allow_zero=True)
     if seed is not None and (
         isinstance(seed, bool) or not isinstance(seed, int)
     ):
@@ -649,92 +713,60 @@ def forecast_cash_flow(
     if initial_action is not None and not isinstance(initial_action, GameAction):
         raise TypeError("initial_action deve ser GameAction ou None.")
 
-    effective_seed = (
-        random.SystemRandom().getrandbits(64) if seed is None else seed
-    )
-    seed_rng = random.Random(effective_seed)
     starting_cash = loop.game.player_states[player_id].money
-    turns_per_round = max(1, len(loop.game.active_player_ids))
-    start_turn = loop.game.turn_counter
-    targets = {
-        rounds: start_turn + rounds * turns_per_round
-        for rounds in horizon_values
-    }
-    max_requested_turns = max(targets.values()) - start_turn
-    action_limit = max(256, max_requested_turns * MAX_ACTIONS_PER_TURN)
-
-    observations: dict[int, list[tuple[int, bool, bool]]] = {
-        rounds: [] for rounds in horizon_values
-    }
-
-    for _ in range(simulations):
-        scenario = loop.clone()
-        scenario.game.record_events = False
-        scenario.game.history_logs.clear()
-        _reseed_random_sources(scenario, seed_rng)
-        policies = {
-            candidate: GreedyPolicy(reserve=greedy_reserve)
-            for candidate in scenario.game.turn_order
-        }
-        recorded: set[int] = set()
-        actions = 0
-
-        if initial_action is not None:
-            result = scenario.process_action(initial_action)
-            if result["status"] != "SUCCESS":
-                raise ValueError(
-                    "A ação inicial do forecast condicionado foi rejeitada: "
-                    f"{initial_action.action_type}: {result['reason']}"
-                )
-            actions += 1
-
-        while len(recorded) < len(horizon_values):
-            for rounds in horizon_values:
-                if rounds in recorded:
-                    continue
-                if scenario.game.game_over or scenario.game.turn_counter >= targets[rounds]:
-                    state = scenario.game.player_states[player_id]
-                    observations[rounds].append(
-                        (state.money, state.is_bankrupt, scenario.game.game_over)
-                    )
-                    recorded.add(rounds)
-
-            if len(recorded) == len(horizon_values):
-                break
-            if actions >= action_limit:
-                raise RuntimeError(
-                    "A simulação greedy excedeu o limite de ações antes de "
-                    "alcançar o horizonte."
-                )
-
-            actor = scenario.current_decision_player_id
-            action = policies[actor](scenario)
-            result = scenario.process_action(action)
-            if result["status"] != "SUCCESS":
-                raise RuntimeError(
-                    "GreedyPolicy gerou uma ação rejeitada no forecast: "
-                    f"{action.action_type}: {result['reason']}"
-                )
-            actions += 1
-
-    forecasts = tuple(
-        _summarize_horizon(
-            rounds=rounds,
-            requested_turns=rounds * turns_per_round,
-            starting_cash=starting_cash,
-            observations=observations[rounds],
-        )
-        for rounds in horizon_values
-    )
-    return CashFlowForecast(
-        player_id=player_id,
-        seed=effective_seed,
-        simulations=simulations,
+    scenario = loop.clone()
+    if initial_action is not None:
+        applied = scenario.process_action(initial_action)
+        if applied["status"] != "SUCCESS":
+            raise ValueError(
+                "A ação inicial do forecast condicionado foi rejeitada: "
+                f"{initial_action.action_type}: {applied['reason']}"
+            )
+    path = _analytic_cash_path(
+        scenario, player_id, config, horizon_values,
         starting_cash=starting_cash,
-        policy_name="GreedyPolicy",
-        conditioned_on=(initial_action.action_type if initial_action else None),
-        horizons=forecasts,
     )
+    forecasts = []
+    active_turns_per_round = max(1, len(scenario.game.active_player_ids))
+    already_bankrupt = scenario.game.player_states[player_id].is_bankrupt
+    already_over = scenario.game.game_over
+    for index, rounds in enumerate(horizon_values):
+        mean = float(path["cash_mean"][index])
+        std = sqrt(float(path["cash_variance"][index]))
+        normal = NormalDist()
+        net_quantiles = [mean + std * normal.inv_cdf(q) for q in (0.1, 0.5, 0.9)] if std else [mean] * 3
+        ending_mean = starting_cash + mean
+        cash_quantiles = [value + starting_cash for value in net_quantiles]
+        forecasts.append(CashFlowHorizonForecast(
+            horizon_rounds=rounds,
+            requested_turns=rounds * active_turns_per_round,
+            mean_net_cash_flow=mean,
+            std_net_cash_flow=std,
+            p10_net_cash_flow=float(net_quantiles[0]),
+            median_net_cash_flow=float(net_quantiles[1]),
+            p90_net_cash_flow=float(net_quantiles[2]),
+            mean_ending_cash=ending_mean,
+            p10_ending_cash=float(cash_quantiles[0]),
+            median_ending_cash=float(cash_quantiles[1]),
+            p90_ending_cash=float(cash_quantiles[2]),
+            bankruptcy_probability=float(already_bankrupt),
+            game_over_probability=float(already_over),
+            net_cash_flow_samples=(),
+            ending_cash_samples=(),
+            bankrupt_samples=(),
+            game_over_samples=(),
+        ))
+    forecast = CashFlowForecast(
+        player_id=player_id,
+        seed=0 if seed is None else seed,
+        simulations=0,
+        starting_cash=starting_cash,
+        policy_name="FixedStateMarkov",
+        conditioned_on=(initial_action.action_type if initial_action else None),
+        horizons=tuple(forecasts),
+    )
+    _record_forecast_stage("conditioned_cash", started)
+    return forecast
 
 
 def _validate_horizons(horizons: Iterable[int]) -> tuple[int, ...]:
@@ -751,64 +783,3 @@ def _validate_horizons(horizons: Iterable[int]) -> tuple[int, ...]:
     if len(set(values)) != len(values):
         raise ValueError("Os horizontes não podem se repetir.")
     return tuple(sorted(values))
-
-
-def _validate_positive_integer(
-    name: str,
-    value: int,
-    *,
-    allow_zero: bool = False,
-) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} deve ser um inteiro.")
-    minimum = 0 if allow_zero else 1
-    if value < minimum:
-        qualifier = "não negativo" if allow_zero else "positivo"
-        raise ValueError(f"{name} deve ser {qualifier}.")
-
-
-def _reseed_random_sources(loop: GameLoop, seed_rng: random.Random) -> None:
-    sources = (loop.game.dice, *loop.game.decks.values())
-    for source in sources:
-        rng = getattr(source, "_rng", None)
-        reseed = getattr(rng, "seed", None)
-        if callable(reseed):
-            reseed(seed_rng.getrandbits(64))
-
-
-def _summarize_horizon(
-    *,
-    rounds: int,
-    requested_turns: int,
-    starting_cash: int,
-    observations: list[tuple[int, bool, bool]],
-) -> CashFlowHorizonForecast:
-    if not observations:
-        raise RuntimeError(f"Nenhum cenário foi registrado para {rounds} rodada(s).")
-
-    ending_cash = np.asarray([item[0] for item in observations], dtype=np.float64)
-    net_cash_flow = ending_cash - starting_cash
-    bankrupt = np.asarray([item[1] for item in observations], dtype=np.float64)
-    game_over = np.asarray([item[2] for item in observations], dtype=np.float64)
-    flow_p10, flow_p50, flow_p90 = np.quantile(net_cash_flow, (0.1, 0.5, 0.9))
-    cash_p10, cash_p50, cash_p90 = np.quantile(ending_cash, (0.1, 0.5, 0.9))
-
-    return CashFlowHorizonForecast(
-        horizon_rounds=rounds,
-        requested_turns=requested_turns,
-        mean_net_cash_flow=float(np.mean(net_cash_flow)),
-        std_net_cash_flow=float(np.std(net_cash_flow)),
-        p10_net_cash_flow=float(flow_p10),
-        median_net_cash_flow=float(flow_p50),
-        p90_net_cash_flow=float(flow_p90),
-        mean_ending_cash=float(np.mean(ending_cash)),
-        p10_ending_cash=float(cash_p10),
-        median_ending_cash=float(cash_p50),
-        p90_ending_cash=float(cash_p90),
-        bankruptcy_probability=float(np.mean(bankrupt)),
-        game_over_probability=float(np.mean(game_over)),
-        net_cash_flow_samples=tuple(int(value) for value in net_cash_flow),
-        ending_cash_samples=tuple(int(value) for value in ending_cash),
-        bankrupt_samples=tuple(bool(value) for value in bankrupt),
-        game_over_samples=tuple(bool(value) for value in game_over),
-    )

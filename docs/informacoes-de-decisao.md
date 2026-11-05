@@ -27,9 +27,18 @@ Nas distribuições, cada horizonte inclui `horizon_rounds`; use esse identifica
 
 `ROLL_DICE` fora da prisão apenas inicia o fluxo da jogada. `END_TURN` conclui as decisões disponíveis naquele turno. A observação atual, a fase e a máscara informam quando essas ações são legais. Na prisão, `ROLL_DICE` faz parte de `jail_analysis`, pois concorre com pagar multa ou usar uma carta.
 
-## Reprodutibilidade e política de continuação
+## Reprodutibilidade e hipótese do forecast
 
-Quando informado, o mesmo `seed` reproduz as simulações para o mesmo estado e parâmetros. O forecast de caixa usa `GreedyPolicy` para a continuação dos jogadores. O código de análise não escolhe a melhor ação nem aplica uma ponderação entre retorno, risco e objetivo de treino; essa interpretação cabe à política.
+Os forecasts de caixa usam como padrão os horizontes de 1 e 2 rodadas e as probabilidades do
+modelo de Markov, condicionadas às posições atuais, ao estado da prisão, às cartas configuradas
+e à carteira atual. Após aplicar a ação
+candidata, propriedades, construções e hipotecas permanecem fixas; nenhuma política escolhe
+ações futuras. O movimento e os efeitos monetários geram momentos sob o modelo de Markov; os
+percentis são uma aproximação normal. Cartas são amostradas com reposição, e o aluguel de
+utilidade usa a média do lançamento adicional dos dados. Por isso, `seed` e `simulations` não
+alteram o forecast de caixa, embora continuem relevantes para análises amostradas como leilões.
+O código de análise não escolhe a melhor ação nem pondera retorno e risco; essa interpretação
+cabe à política.
 
 ## Consumo por modelos de RL
 

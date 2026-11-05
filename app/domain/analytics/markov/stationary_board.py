@@ -1,10 +1,10 @@
-"""Long-run landing frequencies for a configured Monopoly board.
+"""Markov movement transitions and long-run landing frequencies.
 
-Dice outcomes and configured movement cards are modeled explicitly. Card draws
-are independent uniform draws (the deck order and held jail cards are not part
-of the Markov state), and jail follows the roll-doubles / forced-release path
-used by the original board-analysis notebook. This is a movement model, not a
-full economic or player-policy model.
+Dice outcomes and configured movement cards are modeled explicitly. Outcomes
+also carry direct card cash effects and Go salary events for finite-horizon
+cash-flow analysis. Card draws are independent uniform draws with replacement;
+the additional utility dice roll is represented by its expected total. This is
+not a complete debt, insolvency, or player-policy model.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class MonopolyMovementState:
 
 @dataclass(frozen=True, slots=True)
 class MonopolyMovementOutcome:
-    """One possible state transition and the landing/rent event it creates."""
+    """One possible movement transition and its landing/card cash effects."""
 
     state: MonopolyMovementState
     probability: float
@@ -42,6 +42,11 @@ class MonopolyMovementOutcome:
     rent_dice_total: float
     rent_multiplier: float = 1.0
     turn_ended: bool = True
+    go_salary_count: int = 0
+    player_cash_delta: int = 0
+    other_player_cash_delta: int = 0
+    repair_house_cost: int = 0
+    repair_hotel_cost: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +104,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         *,
         dice_sides: tuple[int, int] = (6, 6),
         max_card_chain: int = 4,
+        number_of_players: int = 2,
     ) -> None:
         if not config.board:
             raise ValueError("A configuração precisa conter um tabuleiro.")
@@ -109,6 +115,8 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
             raise ValueError("dice_sides deve conter duas quantidades de faces >= 2.")
         if isinstance(max_card_chain, bool) or not isinstance(max_card_chain, int) or max_card_chain <= 0:
             raise ValueError("max_card_chain deve ser um inteiro positivo.")
+        if isinstance(number_of_players, bool) or not isinstance(number_of_players, int) or number_of_players < 2:
+            raise ValueError("number_of_players deve ser um inteiro >= 2.")
 
         self.config = config
         self.board_size = len(config.board)
@@ -138,6 +146,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         self.max_jail_attempts = (
             rules.max_jail_attempts if rules is not None else settings.jail_max_turns
         )
+        self.jail_fine = rules.jail_fine if rules is not None else settings.jail_fine
         if not 0 <= self.jail_position < self.board_size:
             raise ValueError("jail_position está fora do tabuleiro.")
         if not 0 <= self.go_to_jail_position < self.board_size:
@@ -147,6 +156,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
 
         self.dice_sides = dice_sides
         self.max_card_chain = max_card_chain
+        self.number_of_players = number_of_players
         self.expected_dice_total = (dice_sides[0] + 1 + dice_sides[1] + 1) / 2
         states = [
             MonopolyMovementState(position, False, 0, doubles_streak)
@@ -238,6 +248,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                     continue
 
                 destination = (source.position + dice_total) % self.board_size
+                salary_count = int(source.position + dice_total >= self.board_size)
                 outcomes.extend(
                     self._resolve_landing(
                         destination,
@@ -248,6 +259,7 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                         rent_multiplier=1.0,
                         utility_reroll=False,
                         card_depth=0,
+                        go_salary_count=salary_count,
                     )
                 )
 
@@ -291,6 +303,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                 rent_multiplier=1.0,
                 utility_reroll=False,
                 card_depth=0,
+                player_cash_delta=(
+                    -self.jail_fine
+                    if not is_double and next_attempt >= self.max_jail_attempts
+                    else 0
+                ),
             )
         )
 
@@ -305,6 +322,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
         rent_multiplier: float,
         utility_reroll: bool,
         card_depth: int,
+        go_salary_count: int = 0,
+        player_cash_delta: int = 0,
+        other_player_cash_delta: int = 0,
+        repair_house_cost: int = 0,
+        repair_hotel_cost: int = 0,
     ) -> list[MonopolyMovementOutcome]:
         if position == self.go_to_jail_position:
             return [
@@ -314,6 +336,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                     None,
                     dice_total,
                     turn_ended=True,
+                    go_salary_count=go_salary_count,
+                    player_cash_delta=player_cash_delta,
+                    other_player_cash_delta=other_player_cash_delta,
+                    repair_house_cost=repair_house_cost,
+                    repair_hotel_cost=repair_hotel_cost,
                 )
             ]
 
@@ -328,6 +355,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                     self.expected_dice_total if utility_reroll else dice_total,
                     rent_multiplier,
                     turn_ended=not roll_continues,
+                    go_salary_count=go_salary_count,
+                    player_cash_delta=player_cash_delta,
+                    other_player_cash_delta=other_player_cash_delta,
+                    repair_house_cost=repair_house_cost,
+                    repair_hotel_cost=repair_hotel_cost,
                 )
             ]
 
@@ -351,11 +383,37 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                         None,
                         dice_total,
                         turn_ended=True,
+                        go_salary_count=go_salary_count,
+                        player_cash_delta=player_cash_delta,
+                        other_player_cash_delta=other_player_cash_delta,
+                        repair_house_cost=repair_house_cost,
+                        repair_hotel_cost=repair_hotel_cost,
                     )
                 )
                 continue
 
             destination, moves = self._card_destination(position, action, data)
+            next_salary_count = go_salary_count
+            if moves and action != "go_back" and data.get("collectGoSalary", True) and destination < position:
+                next_salary_count += 1
+            next_player_cash_delta = player_cash_delta
+            next_other_player_cash_delta = other_player_cash_delta
+            next_repair_house_cost = repair_house_cost
+            next_repair_hotel_cost = repair_hotel_cost
+            amount = int(data.get("amount", 0))
+            if action in {"collect", "bank_error"}:
+                next_player_cash_delta += amount
+            elif action == "pay":
+                next_player_cash_delta -= amount
+            elif action == "pay_each_player":
+                next_player_cash_delta -= amount * (self.number_of_players - 1)
+                next_other_player_cash_delta += amount
+            elif action in {"collect_from_each_player", "birthday"}:
+                next_player_cash_delta += amount * (self.number_of_players - 1)
+                next_other_player_cash_delta -= amount
+            elif action == "repairs":
+                next_repair_house_cost += int(data.get("houseCost", 0))
+                next_repair_hotel_cost += int(data.get("hotelCost", 0))
             if not moves:
                 outcomes.append(
                     MonopolyMovementOutcome(
@@ -365,6 +423,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                         dice_total,
                         rent_multiplier,
                         turn_ended=not roll_continues,
+                        go_salary_count=next_salary_count,
+                        player_cash_delta=next_player_cash_delta,
+                        other_player_cash_delta=next_other_player_cash_delta,
+                        repair_house_cost=next_repair_house_cost,
+                        repair_hotel_cost=next_repair_hotel_cost,
                     )
                 )
                 continue
@@ -381,6 +444,11 @@ class MonopolyBoardModel(TransitionModel[MonopolyMovementState]):
                     rent_multiplier=card_rent_multiplier,
                     utility_reroll=card_utility_reroll,
                     card_depth=card_depth + 1,
+                    go_salary_count=next_salary_count,
+                    player_cash_delta=next_player_cash_delta,
+                    other_player_cash_delta=next_other_player_cash_delta,
+                    repair_house_cost=next_repair_house_cost,
+                    repair_hotel_cost=next_repair_hotel_cost,
                 )
             )
         return outcomes

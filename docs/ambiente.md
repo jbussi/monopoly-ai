@@ -271,27 +271,32 @@ marginal com qualquer lance que esteja considerando. O bloco é somente informat
 prescreve uma ação.
 
 `cash_flow_forecast` só fica ativo quando o observador é o jogador que decide comprar um
-imóvel. Compara `buy` e `decline` em três horizontes (1, 3 e 5 turnos pessoais), usando 32
-simulações pareadas e os mesmos fluxos aleatórios em cada par. Os arrays de cenário usam
-ordem `[buy, decline]`; os últimos eixos dos campos de distribuição usam
+imóvel. Compara `buy` e `decline` nos horizontes de 1 e 2 rodadas da mesa. Os arrays de
+cenário usam ordem `[buy, decline]`; os últimos eixos dos campos de distribuição usam
 `[média, p05, p25, p50, p75, p95]`. `cash_change`, `cash_in`, `cash_out`, `ending_cash` e
-`minimum_cash` são normalizados pelo fator monetário. As probabilidades de dívida e falência
-permanecem entre 0 e 1. Horizonte 1 inclui o restante da vez atual até a próxima vez do
-jogador; horizontes 3 e 5 avançam a partir daí.
+`minimum_cash` são normalizados pelo fator monetário. Não há coleta de amostras: `sample_count`
+é zero. As probabilidades de movimento propagam as posições e estados de prisão atuais,
+considerando dados, cartas, aluguéis, impostos e efeitos monetários das cartas.
 
-As trajetórias usam cópias da partida e o motor real para dados, cartas, aluguéis, impostos e
-liquidação. Para decisões futuras, todos os jogadores usam `GreedyPolicy`; no cenário de
-recusa, o agente focal sai do leilão daquele imóvel. A ordem oculta das cartas é substituída
-por embaralhamentos determinísticos dos conteúdos conhecidos, pareados entre os cenários.
-Assim, a distribuição é condicional ao estado atual, mas depende dessa política de referência
-e não representa uma previsão sem hipótese sobre o comportamento futuro.
+Após aplicar a decisão imediata, propriedades, casas, hotéis e hipotecas ficam fixos. Nenhum
+jogador compra, constrói, negocia ou liquida durante a projeção. O movimento é propagado pelo
+modelo de Markov; os percentis de caixa aproximam uma distribuição normal ajustada aos momentos
+do modelo de transição. Cartas são sorteadas com reposição e o dado extra de aluguel de utilidade
+usa seu valor esperado. `debt_probability` representa a chance aproximada de o caixa projetado ficar
+abaixo de zero. Falência não é projetada, pois dependeria das decisões futuras de resolução de
+dívida. Horizonte 1 representa uma rodada completa da mesa; horizonte 2 avança mais uma rodada
+completa. `cash_in` é a parte positiva da variação líquida projetada. `cash_out` preserva o desembolso
+imediato da ação (por exemplo, o preço de compra) e soma a parte negativa da variação futura
+projetada; não representa o volume bruto de todas as transações. `minimum_cash` aproxima o menor
+valor entre o caixa inicial e o caixa final projetado; não modela o instante intermediário de cada
+pagamento.
 
 `jail_decision_forecast` fica ativo quando o observador está preso e deve escolher entre
-`ROLL_DICE`, `PAY_JAIL_FINE` e `USE_JAIL_CARD`, nessa ordem. Para cada opção, simula 1, 3 e
-5 turnos pessoais usando o motor e a `GreedyPolicy` nas decisões futuras; informa distribuições
-de caixa, probabilidade de continuar preso, dívida e falência, além da quantidade esperada de
-cartas de prisão restante. A probabilidade de prisão é o estado no fim de cada horizonte e pode
-incluir uma nova ida à cadeia depois da saída inicial.
+`ROLL_DICE`, `PAY_JAIL_FINE` e `USE_JAIL_CARD`, nessa ordem. Aplica cada opção imediata e
+propaga 1 e 2 rodadas com os pressupostos de carteira fixa, sem decisões de política futura.
+Informa distribuição aproximada de caixa, chance de saldo negativo, probabilidade de estar preso
+ao fim do horizonte, cartas restantes e oportunidades condicionais por imóvel livre. A
+probabilidade de prisão pode incluir uma nova ida à cadeia após a saída inicial.
 
 `property_available` identifica imóveis sem dono no estado atual. Para cada um, os vetores
 `property_marginal_income_per_turn` e `property_marginal_yield` mostram sua avaliação
@@ -306,12 +311,10 @@ Para gestão dos imóveis, `management_decision_valuation` lista por tipo de aç
 legal o caixa recebido ou gasto imediatamente e a renda estacionária do grupo antes e depois
 da alteração. A ordem dos tipos é `BUILD_HOUSE`, `SELL_HOUSE`, `MORTGAGE`, `UNMORTGAGE`.
 `marginal_yield_per_turn` é a variação de renda bruta por turno dividida pelo valor absoluto
-do caixa movimentado. `management_cash_forecast` fornece, para cada opção legal,
-distribuições pareadas entre executar a ação agora e adiá-la uma vez, nos horizontes 1, 3 e
-5. Ao adiar, usa uma ação de continuação compatível com a fase (rolar, encerrar a vez ou
-encerrar negociações de dívida); depois disso, todos seguem `GreedyPolicy`. As amostras usam
-a mesma ordem de estatísticas e escala monetária de `cash_flow_forecast`, com 8 amostras por
-comparação. As projeções deixam explícita a hipótese de continuação e não recomendam
+do caixa movimentado. `management_cash_forecast` fornece, para cada opção legal, uma comparação
+entre executar a ação agora e manter o estado atual, nos horizontes 1 e 2. A ação imediata
+altera o estado inicial; depois disso, ativos e decisões ficam fixos. Usa as mesmas estatísticas
+e escala monetária de `cash_flow_forecast`, sem amostras. As projeções não recomendam
 automaticamente uma ação.
 
 A ação v2 é um `Dict` com os seguintes campos:

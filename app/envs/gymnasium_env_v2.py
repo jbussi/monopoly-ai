@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from time import perf_counter
 from typing import Any
 
 import gymnasium as gym
@@ -41,7 +42,7 @@ class MonopolyGymEnvV2(gym.Env):
         render_mode: str | None = None,
         on_illegal: str = "raise",
         illegal_reward: float = -1.0,
-        decision_horizons: Sequence[int] = (1, 3, 5),
+        decision_horizons: Sequence[int] = (1, 2),
         max_decision_alternatives: int = 128,
     ) -> None:
         if not 2 <= num_players <= max_players <= 12:
@@ -84,6 +85,7 @@ class MonopolyGymEnvV2(gym.Env):
         )
 
     def _setup_episode(self, seed: int | None) -> None:
+        self.observation_seconds = 0.0
         self.loop = self._new_game(seed)
         self.action_map = StructuredActionSpace(
             self.loop, self.max_players, loop_provider=lambda: self.loop
@@ -228,6 +230,7 @@ class MonopolyGymEnvV2(gym.Env):
                 raise RuntimeError(f"A política oponente produziu uma ação inválida: {result}")
 
     def _observation(self) -> dict[str, Any]:
+        started = perf_counter()
         is_current_actor = (
             not self.loop.game.game_over
             and self.loop.current_decision_player_id == self.learner_id
@@ -240,7 +243,9 @@ class MonopolyGymEnvV2(gym.Env):
         if not is_current_actor:
             for values in mask.values():
                 values.fill(0)
-        return {**state, "action_mask": mask}
+        result = {**state, "action_mask": mask}
+        self.observation_seconds += perf_counter() - started
+        return result
 
     def _info(self) -> dict[str, Any]:
         return {

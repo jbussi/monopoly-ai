@@ -9,6 +9,7 @@ from uuid import UUID
 
 from app.domain.game.actions import ActionType, GameAction
 from app.domain.game.game_loop import GameLoop
+from app.infraestructure.game_config.models import GameConfig
 from app.envs.cash_flow_forecast import CashFlowForecast, forecast_cash_flow
 
 
@@ -62,9 +63,10 @@ _DEBT_ACTIONS = {
 
 def analyze_debt_resolution(
     loop: GameLoop,
+    config: GameConfig,
     *,
     candidate_actions: Iterable[GameAction] | None = None,
-    horizons: Iterable[int] = (1, 3, 5),
+    horizons: Iterable[int] = (1, 2),
     simulations: int = 64,
     seed: int | None = None,
     greedy_reserve: int = 150,
@@ -73,8 +75,10 @@ def analyze_debt_resolution(
 
     By default, concrete actions from ``GameLoop.legal_actions`` are included.
     Structured trade offers/counters can be supplied in ``candidate_actions``.
-    Every scenario starts from the same state and uses the same seed, making
-    comparisons reproducible. The rollout uses GreedyPolicy for every player.
+    Every scenario starts from the same state. Subsequent cash projections use
+    fixed holdings and the configured Markov movement model; the supplied seed
+    is retained for a stable result record but does not affect this analytic
+    forecast.
     """
     if loop.turn_phase != GameLoop.RESOLVE_DEBT or loop.game.debt_resolution is None:
         raise ValueError("A análise de dívida exige uma decisão na fase RESOLVE_DEBT.")
@@ -144,6 +148,7 @@ def analyze_debt_resolution(
             forecast = forecast_cash_flow(
                 loop,
                 player_id,
+                config=config,
                 horizons=horizon_values,
                 simulations=simulations,
                 seed=effective_seed + action_index,

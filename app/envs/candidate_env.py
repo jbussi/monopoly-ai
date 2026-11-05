@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from time import perf_counter
 from typing import Any
 
 import gymnasium as gym
@@ -34,7 +35,7 @@ class CandidateSelectionEnv(gym.Wrapper):
         max_candidates: int = 128,
         max_trade_candidates: int = 4,
         candidate_analysis_simulations: int = 1,
-        candidate_analysis_horizons: tuple[int, ...] = (1, 3, 5),
+        candidate_analysis_horizons: tuple[int, ...] = (1, 2),
         trade_analysis_mode: str = "on_demand",
     ) -> None:
         if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates < 1:
@@ -75,6 +76,7 @@ class CandidateSelectionEnv(gym.Wrapper):
         self.candidate_action_mask = np.zeros(max_candidates + 1, dtype=np.int8)
         self.money_scale = float(max(1, env.loop.rules.starting_money, env.loop.rules.go_salary))
         self._episode_seed = 0
+        self.stage_timings = {"candidate_encoding_seconds": 0.0, "trade_analysis_seconds": 0.0}
         self._analysis_done = False
         self._base_observation: dict[str, Any] = {}
         self.decision_encoder = self._make_decision_encoder(
@@ -115,6 +117,7 @@ class CandidateSelectionEnv(gym.Wrapper):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         """Reset the wrapped episode and generate its first legal candidates."""
         observation, info = self.env.reset(seed=seed, options=options)
+        self.stage_timings = {"candidate_encoding_seconds": 0.0, "trade_analysis_seconds": 0.0}
         self._episode_seed = 0 if seed is None else int(seed)
         self.candidate_provider.reset(seed)
         self.decision_encoder = self._make_decision_encoder(
@@ -163,7 +166,9 @@ class CandidateSelectionEnv(gym.Wrapper):
         *,
         refresh_candidates: bool = True,
     ) -> dict[str, Any]:
+        started = perf_counter()
         loop = self.env.loop
+        self._ensure_decision_encoder_matches_game(loop)
         if refresh_candidates:
             is_learner_decision = (
                 not loop.game.game_over
@@ -201,7 +206,7 @@ class CandidateSelectionEnv(gym.Wrapper):
             and any(self._needs_trade_analysis(loop, candidate) for candidate in self.candidate_actions)
         ):
             self.candidate_action_mask[self.analysis_action_index] = 1
-        return {
+        result = {
             **observation,
             "candidate_actions": features,
             "candidate_mask": self.candidate_mask.copy(),
@@ -209,8 +214,29 @@ class CandidateSelectionEnv(gym.Wrapper):
             "candidate_decision_features": decision_features,
             "candidate_analysis_mask": self.candidate_analysis_mask.copy(),
         }
+        self.stage_timings["candidate_encoding_seconds"] += perf_counter() - started
+        return result
+
+    def _ensure_decision_encoder_matches_game(self, loop) -> None:
+        """Refresh the context encoder if the wrapped environment changed games."""
+        turn_order = tuple(loop.game.turn_order)
+        if self.decision_encoder.turn_order == turn_order:
+            return
+        self.decision_encoder = self._make_decision_encoder(
+            self.env, self.candidate_analysis_horizons
+        )
+        self.decision_feature_space = flatten_space(
+            self.decision_encoder.observation_space
+        )
+        self.decision_feature_size = int(np.prod(self.decision_feature_space.shape))
+        self.candidate_analysis_mask.fill(0)
+        self._candidate_decision_features = np.zeros(
+            (self.max_candidates, self.decision_feature_size), dtype=np.float32
+        )
+        self._analysis_done = False
 
     def _analyze_trade_candidates(self) -> np.ndarray:
+        started = perf_counter()
         loop = self.env.loop
         result = np.zeros(
             (self.max_candidates, self.decision_feature_size), dtype=np.float32
@@ -234,6 +260,11 @@ class CandidateSelectionEnv(gym.Wrapper):
                 )
                 if candidate.action_type in (ActionType.ACCEPT_TRADE, ActionType.REJECT_TRADE):
                     trade_analysis_cache = context
+            if context.player_id not in loop.game.player_states:
+                raise ValueError(
+                    "A análise de candidata retornou um jogador de outra partida "
+                    f"(jogador={context.player_id}, jogadores={tuple(loop.game.turn_order)})."
+                )
             encoded = self.decision_encoder.encode(context)
             result[row] = flatten(
                 self.decision_encoder.observation_space,
@@ -242,6 +273,7 @@ class CandidateSelectionEnv(gym.Wrapper):
             self.candidate_analysis_mask[row] = 1
         self._analysis_done = True
         self._candidate_decision_features = result
+        self.stage_timings["trade_analysis_seconds"] += perf_counter() - started
         return result
 
     @staticmethod

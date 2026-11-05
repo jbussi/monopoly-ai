@@ -9,8 +9,13 @@ from __future__ import annotations
 import random
 import copy
 import json
-from dataclasses import asdict, dataclass
+import os
+from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, dataclass, replace
+from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 import gymnasium as gym
@@ -53,11 +58,16 @@ class PPOTrainingConfig:
     archive_opponent_rate: float = 0.5
     archive_dir: str = "runs/policy_bank"
     trade_analysis_mode: str = "automatic"
-    device: str = "cpu"
+    num_workers: int = 1
+    device: str = "auto"
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.episodes_per_update < 1:
             raise ValueError("episodes e episodes_per_update devem ser positivos.")
+        if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers < 1:
+            raise ValueError("num_workers deve ser um inteiro positivo.")
+        if self.device != "auto" and not self.device.startswith(("cpu", "cuda")):
+            raise ValueError("device deve ser 'auto', 'cpu', 'cuda' ou 'cuda:N'.")
         if not 2 <= self.num_players <= 12:
             raise ValueError("num_players deve estar entre 2 e 12.")
         if self.max_turns < 1 or self.max_candidates < 1 or self.action_type_embedding_size < 1:
@@ -181,7 +191,15 @@ class _CandidatePPO:
     def __init__(self, env: CandidateSelectionEnv, config: PPOTrainingConfig):
         self.env = env
         self.config = config
-        self.device = torch.device(config.device)
+        if config.device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(config.device)
+            if self.device.type == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError(
+                    "Foi solicitado device CUDA, mas torch.cuda.is_available() retornou False. "
+                    "Use device='auto' ou device='cpu'."
+                )
         global_spaces = {
             key: space for key, space in env.observation_space.spaces.items()
             if key not in self._candidate_keys
@@ -200,7 +218,24 @@ class _CandidatePPO:
             self.type_embedding_size,
             config.hidden_size,
         ).to(self.device)
+        self.inference_device = torch.device("cpu")
+        self.inference_network = (
+            self.network
+            if self.device.type == "cpu"
+            else copy.deepcopy(self.network).to(self.inference_device)
+        )
+        self.inference_network.eval()
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=config.learning_rate)
+
+    def sync_inference_network(self) -> None:
+        """Copy current learner weights to the CPU policy used during rollouts."""
+        if self.inference_network is self.network:
+            return
+        self.inference_network.load_state_dict({
+            name: tensor.detach().to("cpu")
+            for name, tensor in self.network.state_dict().items()
+        })
+        self.inference_network.eval()
 
     def encode(self, observation: dict[str, Any]) -> _State:
         global_observation = {
@@ -238,7 +273,7 @@ class _CandidatePPO:
         )
 
     def act(self, state: _State, deterministic: bool = False):
-        logits, value = self.network.forward_one(state, self.device)
+        logits, value = self.inference_network.forward_one(state, self.inference_device)
         distribution = Categorical(logits=logits)
         action = torch.argmax(logits) if deterministic else distribution.sample()
         return int(action.item()), distribution.log_prob(action), distribution.entropy(), value
@@ -297,6 +332,7 @@ class _CandidatePPO:
                 totals["value_loss"] += float(value_loss.detach())
                 totals["entropy"] += float(entropy.detach())
                 updates += 1
+        self.sync_inference_network()
         return {key: value / max(1, updates) for key, value in totals.items()}
 
 
@@ -328,15 +364,242 @@ def _make_env_with_opponents(config: PPOTrainingConfig, opponents) -> CandidateS
     )
 
 
-def _episode(env: CandidateSelectionEnv, agent: _CandidatePPO, seed: int, training: bool):
+_ROLLOUT_WORKER_CONFIG: PPOTrainingConfig | None = None
+_ROLLOUT_WORKER_ENV: CandidateSelectionEnv | None = None
+_ROLLOUT_WORKER_AGENT: _CandidatePPO | None = None
+_ROLLOUT_WORKER_ARCHIVE: dict[int, _CandidatePPO] = {}
+
+
+def _initialize_rollout_worker(config: PPOTrainingConfig) -> None:
+    """Create one persistent CPU-only game environment inside a worker process."""
+    global _ROLLOUT_WORKER_CONFIG, _ROLLOUT_WORKER_ENV, _ROLLOUT_WORKER_AGENT
+    global _ROLLOUT_WORKER_ARCHIVE
+    worker_config = replace(config, device="cpu", num_workers=1)
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    _ROLLOUT_WORKER_CONFIG = worker_config
+    _ROLLOUT_WORKER_ENV = _make_env(worker_config)
+    _ROLLOUT_WORKER_AGENT = _CandidatePPO(_ROLLOUT_WORKER_ENV, worker_config)
+    _ROLLOUT_WORKER_ARCHIVE = {}
+
+
+def _cpu_state_dict(network: nn.Module) -> dict[str, torch.Tensor]:
+    """Copy model weights to CPU tensors for process transfer and checkpoints."""
+    return {
+        name: tensor.detach().to("cpu", copy=True)
+        for name, tensor in network.state_dict().items()
+    }
+
+
+def _serialize_trajectory(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert rollout states to safe tensor/primitive checkpoint values."""
+    serialized = []
+    for item in trajectory:
+        state = item["state"]
+        serialized.append({
+            "state": {
+                name: torch.as_tensor(getattr(state, name)).cpu().clone()
+                for name in _State.__dataclass_fields__
+            },
+            **{key: value for key, value in item.items() if key != "state"},
+        })
+    return serialized
+
+
+def _deserialize_trajectory(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild rollout states loaded from a resumable checkpoint."""
+    restored = []
+    for item in trajectory:
+        state_values = {
+            name: item["state"][name].cpu().numpy().copy()
+            for name in _State.__dataclass_fields__
+        }
+        restored.append({
+            "state": _State(**state_values),
+            **{key: value for key, value in item.items() if key != "state"},
+        })
+    return restored
+
+
+def _rng_checkpoint() -> dict[str, Any]:
+    """Capture random generators used by lineup sampling and PPO updates."""
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": {
+            "algorithm": numpy_state[0],
+            "keys": torch.as_tensor(numpy_state[1].copy(), dtype=torch.int64),
+            "position": int(numpy_state[2]),
+            "has_gauss": int(numpy_state[3]),
+            "cached_gaussian": float(numpy_state[4]),
+        },
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    }
+
+
+def _restore_rng_checkpoint(state: dict[str, Any]) -> None:
+    """Restore random generators after all checkpoint objects are initialized."""
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state((
+        numpy_state["algorithm"],
+        numpy_state["keys"].cpu().numpy().astype(np.uint32, copy=True),
+        int(numpy_state["position"]),
+        int(numpy_state["has_gauss"]),
+        float(numpy_state["cached_gaussian"]),
+    ))
+    torch.set_rng_state(state["torch_cpu"].cpu())
+    if state.get("torch_cuda") and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
+    """Write a checkpoint beside its destination, then atomically replace it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(path.name + ".tmp")
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, path)
+
+
+def _write_episode_status(path: Path, **updates: Any) -> None:
+    """Atomically record the latest durable progress for one training game."""
+    status = {}
+    if path.exists():
+        try:
+            status = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status = {}
+    if updates.get("status") == "queued" and status.get("status") == "running":
+        status["previous_attempt"] = {
+            key: status[key] for key in (
+                "attempt", "learner_decisions", "game_turn", "turn_phase", "updated_at"
+            ) if key in status
+        }
+    if updates.pop("attempt_started", False):
+        status["attempt"] = int(status.get("attempt", 0)) + 1
+    status.update(updates)
+    status["updated_at"] = datetime.now().astimezone().isoformat()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(path.name + ".tmp")
+    temporary_path.write_text(
+        json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(temporary_path, path)
+
+
+def _validate_resume_config(
+    saved_config: dict[str, Any],
+    config: PPOTrainingConfig,
+    next_episode: int,
+) -> None:
+    """Reject resumes whose game or learning semantics differ from the checkpoint."""
+    current = asdict(config)
+    runtime_fields = {"episodes", "num_workers", "device"}
+    differences = [
+        key for key, value in current.items()
+        if key not in runtime_fields and saved_config.get(key) != value
+    ]
+    if differences:
+        raise ValueError(
+            "A retomada exige a mesma configuração de jogo e PPO. Campos diferentes: "
+            + ", ".join(differences)
+        )
+    if config.episodes < next_episode:
+        raise ValueError(
+            f"O checkpoint já concluiu {next_episode} partidas, acima do limite "
+            f"configurado ({config.episodes})."
+        )
+
+
+def _run_rollout_worker(job: dict[str, Any]):
+    """Run one episode on a persistent process-local CPU environment."""
+    global _ROLLOUT_WORKER_AGENT, _ROLLOUT_WORKER_ENV, _ROLLOUT_WORKER_CONFIG
+    global _ROLLOUT_WORKER_ARCHIVE
+    if _ROLLOUT_WORKER_AGENT is None or _ROLLOUT_WORKER_ENV is None or _ROLLOUT_WORKER_CONFIG is None:
+        raise RuntimeError("O worker PPO não foi inicializado.")
+    agent = _ROLLOUT_WORKER_AGENT
+    env = _ROLLOUT_WORKER_ENV
+    config = _ROLLOUT_WORKER_CONFIG
+    episode_seed = int(job["episode_seed"])
+    random.seed(episode_seed)
+    np.random.seed(episode_seed % (2**32))
+    torch.manual_seed(episode_seed)
+    agent.network.load_state_dict(job["learner_state"])
+    agent.network.eval()
+    agent.sync_inference_network()
+
+    archive_states = iter(job["archive_states"])
+    opponents = []
+    for seat, profile_name in enumerate(job["profile_names"]):
+        if profile_name != "archive":
+            opponents.append(_make_named_baseline(profile_name))
+            continue
+        generation, state_dict = next(archive_states)
+        archived = _ROLLOUT_WORKER_ARCHIVE.get(generation)
+        if archived is None:
+            archived = _CandidatePPO(env, config)
+            _ROLLOUT_WORKER_ARCHIVE[generation] = archived
+        archived.network.load_state_dict(state_dict)
+        archived.network.eval()
+        archived.sync_inference_network()
+        opponents.append(_ArchivedPolicy(
+            archived,
+            env,
+            seed=config.seed + int(job["episode_index"]) * 31 + seat + generation,
+        ))
+    env.env.opponents = opponents
+    status_path = Path(job["status_path"])
+    _write_episode_status(status_path, status="running", attempt_started=True)
+
+    def report_progress(progress: dict[str, Any]) -> None:
+        _write_episode_status(status_path, **progress)
+
+    try:
+        result = _episode(
+            env, agent, episode_seed, training=True,
+            progress_callback=report_progress,
+        )
+    except BaseException as exc:
+        _write_episode_status(
+            status_path, status="failed", error=f"{type(exc).__name__}: {exc}"
+        )
+        raise
+    _write_episode_status(
+        status_path, status="rollout_complete", outcome=result[1]
+    )
+    return result
+
+
+def _episode(
+    env: CandidateSelectionEnv,
+    agent: _CandidatePPO,
+    seed: int,
+    training: bool,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+):
+    from app.envs.cash_flow_forecast import forecast_stage_metrics
+
+    forecast_stage_metrics(reset=True)
+    policy_seconds = 0.0
+    environment_step_seconds = 0.0
+    reset_started = perf_counter()
     observation, _ = env.reset(seed=seed)
+    reset_seconds = perf_counter() - reset_started
     trajectory: list[dict[str, Any]] = []
     terminated = truncated = False
     while not (terminated or truncated):
+        stage_started = perf_counter()
         state = agent.encode(observation)
         with torch.no_grad():
             action, log_prob, _, value = agent.act(state, deterministic=not training)
+        policy_seconds += perf_counter() - stage_started
+        stage_started = perf_counter()
         observation, reward, terminated, truncated, _ = env.step(action)
+        environment_step_seconds += perf_counter() - stage_started
         trajectory.append({
             "state": state,
             "action": action,
@@ -346,6 +609,19 @@ def _episode(env: CandidateSelectionEnv, agent: _CandidatePPO, seed: int, traini
             "terminated": bool(terminated),
             "truncated": bool(truncated),
         })
+        if progress_callback is not None and len(trajectory) % 25 == 0:
+            game = env.env.loop.game
+            current_player = env.env.loop.current_decision_player_id
+            progress_callback({
+                "status": "running",
+                "learner_decisions": len(trajectory),
+                "game_turn": int(game.turn_counter),
+                "turn_phase": str(env.env.loop.turn_phase),
+                "current_actor_seat": (
+                    game.turn_order.index(current_player)
+                    if current_player in game.turn_order else None
+                ),
+            })
     game = env.env.loop.game
     learner_id = env.env.learner_id
     outcome = {
@@ -361,14 +637,46 @@ def _episode(env: CandidateSelectionEnv, agent: _CandidatePPO, seed: int, traini
         "cash": int(game.player_states[learner_id].money),
         "net_worth": int(game.net_worth(learner_id)),
         "properties": int(len(game.owned_tiles(learner_id))),
+        "winner_seat": (
+            int(game.turn_order.index(game.winner_id))
+            if game.winner_id in game.turn_order else -1
+        ),
+        "policy_seconds": policy_seconds,
+        "episode_reset_seconds": reset_seconds,
+        "environment_step_seconds": environment_step_seconds,
+        "observation_seconds": float(env.env.observation_seconds),
+        **{
+            key: float(value)
+            for key, value in env.stage_timings.items()
+        },
+        **forecast_stage_metrics(reset=True),
     }
+    for seat, player_id in enumerate(game.turn_order):
+        player_state = game.player_states[player_id]
+        outcome.update({
+            f"player_{seat}_cash": int(player_state.money),
+            f"player_{seat}_net_worth": int(game.net_worth(player_id)),
+            f"player_{seat}_position": int(game.position_of(player_id)),
+            f"player_{seat}_properties": int(len(game.owned_tiles(player_id))),
+            f"player_{seat}_bankrupt": int(player_state.is_bankrupt),
+            f"player_{seat}_houses": int(sum(
+                game.property_states[tile.tile_id].houses
+                for tile in game.owned_tiles(player_id)
+            )),
+            f"player_{seat}_mortgages": int(sum(
+                game.property_states[tile.tile_id].is_mortgaged
+                for tile in game.owned_tiles(player_id)
+            )),
+        })
     if training:
         if terminated:
             next_value = 0.0
         else:
             with torch.no_grad():
                 next_value = float(
-                    agent.network.forward_one(agent.encode(observation), agent.device)[1]
+                    agent.inference_network.forward_one(
+                        agent.encode(observation), agent.inference_device
+                    )[1]
                 )
         gae = 0.0
         for item in reversed(trajectory):
@@ -466,6 +774,7 @@ def load_ppo_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if checkpoint.get("format") not in {
         "monopoly-ai-ppo-v2",
+        "monopoly-ai-ppo-resume-v1",
         "monopoly-ai-policy-v2",
     }:
         raise ValueError(
@@ -477,6 +786,7 @@ def load_ppo_checkpoint(
     agent = _CandidatePPO(env, config)
     agent.network.load_state_dict(checkpoint["model"])
     agent.network.eval()
+    agent.sync_inference_network()
     return agent, config
 
 
@@ -484,11 +794,39 @@ def train_ppo(
     config: PPOTrainingConfig | None = None,
     *,
     checkpoint_path: str | Path | None = None,
+    resume_from: str | Path | None = None,
     league: TrainingLeague | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[_CandidatePPO, list[dict[str, float]]]:
-    """Train PPO against heuristics and a growing archive of past generations."""
+    """Train PPO with per-episode durable checkpoints and optional resumption."""
     config = config or PPOTrainingConfig()
+    resume_payload = None
+    if resume_from is not None:
+        resume_path = Path(resume_from)
+        resume_payload = torch.load(resume_path, map_location="cpu", weights_only=True)
+        resume_format = resume_payload.get("format")
+        if resume_format == "monopoly-ai-policy-v2":
+            # A generation snapshot can recover learned weights, but predates
+            # per-game optimizer/history checkpoints; continue as a warm start.
+            resume_payload = {
+                **resume_payload,
+                "format": "monopoly-ai-ppo-warm-start-v1",
+                "next_episode": int(resume_payload["episode"]),
+                "history": [],
+                "pending": [],
+                "generation": int(resume_payload["generation"]),
+                "archive_generation_counts": {},
+                "warm_start": True,
+            }
+        elif resume_format != "monopoly-ai-ppo-resume-v1":
+            raise ValueError(
+                "Informe um checkpoint PPO retomável ou um snapshot de geração do banco."
+            )
+        if checkpoint_path is None:
+            checkpoint_path = resume_path
+        _validate_resume_config(
+            resume_payload["config"], config, int(resume_payload["next_episode"])
+        )
     training_league = league or TrainingLeague(
         archive_opponent_rate=config.archive_opponent_rate
     )
@@ -506,6 +844,23 @@ def train_ppo(
     profile_counts["archive"] = 0
     archive_generation_counts: dict[str, int] = {}
     generation = 0
+    start_episode = 0
+    if resume_payload is not None:
+        agent.network.load_state_dict(resume_payload["model"])
+        if resume_payload.get("optimizer") is not None:
+            agent.optimizer.load_state_dict(resume_payload["optimizer"])
+        agent.sync_inference_network()
+        history = list(resume_payload["history"])
+        pending = _deserialize_trajectory(resume_payload["pending"])
+        profile_counts.update(resume_payload.get("profile_counts", {}))
+        archive_generation_counts = dict(resume_payload["archive_generation_counts"])
+        generation = int(resume_payload["generation"])
+        start_episode = int(resume_payload["next_episode"])
+        saved_league = resume_payload.get("league_names")
+        if saved_league is not None and tuple(saved_league) != tuple(training_league.heuristics):
+            raise ValueError(
+                "A liga de oponentes difere do checkpoint; não é seguro retomar."
+            )
     manifest_path = archive_root / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -515,6 +870,13 @@ def train_ppo(
                 "Configure um novo archive_dir para começar um banco v2."
             )
         for entry in manifest.get("policies", []):
+            if (
+                resume_payload is not None
+                and int(entry["generation"]) > int(resume_payload["generation"])
+            ):
+                # Ignore a policy file created after the last committed
+                # training checkpoint; the interrupted episode will be replayed.
+                continue
             policy_path = archive_root / entry["path"]
             if not policy_path.exists():
                 continue
@@ -527,6 +889,7 @@ def train_ppo(
             snapshot = _CandidatePPO(env, config)
             snapshot.network.load_state_dict(saved["model"])
             snapshot.network.eval()
+            snapshot.sync_inference_network()
             archive.append((int(saved["generation"]), snapshot))
             generation = max(generation, int(saved["generation"]))
 
@@ -536,14 +899,15 @@ def train_ppo(
         snapshot = _CandidatePPO(env, config)
         snapshot.network.load_state_dict(copy.deepcopy(agent.network.state_dict()))
         snapshot.network.eval()
+        snapshot.sync_inference_network()
         archive.append((generation, snapshot))
         payload_config = asdict(config)
         path = archive_root / f"generation_{generation:05d}.pt"
-        torch.save({
+        _atomic_torch_save({
             "format": "monopoly-ai-policy-v2",
             "generation": generation,
             "episode": episode_number,
-            "model": snapshot.network.state_dict(),
+            "model": _cpu_state_dict(snapshot.network),
             "config": payload_config,
             "opponent_exposure": {
                 **profile_counts,
@@ -551,6 +915,10 @@ def train_ppo(
             },
         }, path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"format": "monopoly-ai-policy-bank-v2", "policies": []}
+        manifest["policies"] = [
+            entry for entry in manifest["policies"]
+            if int(entry["generation"]) != generation
+        ]
         manifest["policies"].append({
             "generation": generation,
             "episode": episode_number,
@@ -560,48 +928,193 @@ def train_ppo(
                 "archive_generations": dict(archive_generation_counts),
             },
         })
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_manifest = manifest_path.with_name(manifest_path.name + ".tmp")
+        temporary_manifest.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(temporary_manifest, manifest_path)
         profile_counts.update({key: 0 for key in profile_counts})
         archive_generation_counts.clear()
 
-    for episode in range(config.episodes):
-        episode_rng = random.Random(config.seed + episode)
-        profile_names = training_league.sample_lineup(
-            config.num_players - 1,
-            archive_available=bool(archive),
-            rng=episode_rng,
-            episode_index=episode,
+    def save_training_checkpoint(next_episode: int) -> None:
+        if checkpoint_path is None:
+            return
+        _atomic_torch_save({
+            "format": "monopoly-ai-ppo-resume-v1",
+            "model": _cpu_state_dict(agent.network),
+            "optimizer": agent.optimizer.state_dict(),
+            "config": asdict(config),
+            "next_episode": next_episode,
+            "generation": generation,
+            "history": history,
+            "pending": _serialize_trajectory(pending),
+            "profile_counts": profile_counts,
+            "archive_generation_counts": archive_generation_counts,
+            "league_names": tuple(training_league.heuristics),
+            "rng": _rng_checkpoint(),
+        }, Path(checkpoint_path))
+
+    rollout_pool = None
+    rollout_futures = {}
+    rollout_metadata = {}
+    if config.num_workers > 1:
+        worker_config = replace(config, device="cpu", num_workers=1)
+        rollout_pool = ProcessPoolExecutor(
+            max_workers=config.num_workers,
+            mp_context=get_context("spawn"),
+            initializer=_initialize_rollout_worker,
+            initargs=(worker_config,),
         )
-        lineup = []
-        for seat, profile_name in enumerate(profile_names):
-            if profile_name == "archive":
-                old_generation, old_agent = episode_rng.choice(archive)
-                lineup.append(_ArchivedPolicy(
-                    old_agent,
-                    env,
-                    seed=config.seed + episode * 31 + seat + old_generation,
-                ))
-                profile_counts["archive"] += 1
-                generation_label = str(old_generation)
-                archive_generation_counts[generation_label] = archive_generation_counts.get(generation_label, 0) + 1
-            else:
-                lineup.append(training_league.create_heuristic(profile_name))
-                profile_counts[profile_name] += 1
-        env.env.opponents = lineup
-        if progress_callback is not None:
-            progress_callback({
-                "event": "episode_start",
-                "episode": float(episode + 1),
-                "generation": float(generation + 1),
-                "opponents": tuple(profile_names),
-            })
-        trajectory, outcome = _episode(env, agent, config.seed + episode, training=True)
+
+    if resume_payload is not None:
+        if "rng" in resume_payload:
+            _restore_rng_checkpoint(resume_payload["rng"])
+        else:
+            random.seed(config.seed + start_episode)
+            np.random.seed((config.seed + start_episode) % (2**32))
+            torch.manual_seed(config.seed + start_episode)
+    status_root = archive_root / "episode_status"
+    status_root.mkdir(parents=True, exist_ok=True)
+
+    for episode in range(start_episode, config.episodes):
+        status_path = status_root / f"episode_{episode + 1:06d}.json"
+        if rollout_pool is None:
+            episode_rng = random.Random(config.seed + episode)
+            profile_names = training_league.sample_lineup(
+                config.num_players - 1,
+                archive_available=bool(archive),
+                rng=episode_rng,
+                episode_index=episode,
+            )
+            lineup = []
+            for seat, profile_name in enumerate(profile_names):
+                if profile_name == "archive":
+                    old_generation, old_agent = episode_rng.choice(archive)
+                    lineup.append(_ArchivedPolicy(
+                        old_agent,
+                        env,
+                        seed=config.seed + episode * 31 + seat + old_generation,
+                    ))
+                    profile_counts["archive"] += 1
+                    generation_label = str(old_generation)
+                    archive_generation_counts[generation_label] = archive_generation_counts.get(generation_label, 0) + 1
+                else:
+                    lineup.append(training_league.create_heuristic(profile_name))
+                    profile_counts[profile_name] += 1
+            env.env.opponents = lineup
+            _write_episode_status(
+                status_path,
+                status="queued",
+                episode=episode + 1,
+                generation=generation + 1,
+                seed=config.seed + episode,
+                opponents=profile_names,
+            )
+            _write_episode_status(
+                status_path, status="running", attempt_started=True
+            )
+
+            def report_progress(progress: dict[str, Any]) -> None:
+                _write_episode_status(status_path, **progress)
+
+            if progress_callback is not None:
+                progress_callback({
+                    "event": "episode_start",
+                    "episode": float(episode + 1),
+                    "generation": float(generation + 1),
+                    "opponents": tuple(profile_names),
+                })
+            trajectory, outcome = _episode(
+                env, agent, config.seed + episode, training=True,
+                progress_callback=report_progress,
+            )
+            _write_episode_status(
+                status_path, status="rollout_complete", outcome=outcome
+            )
+        else:
+            if episode not in rollout_futures:
+                next_update = ((episode // config.episodes_per_update) + 1) * config.episodes_per_update
+                next_generation = ((episode // config.generation_size) + 1) * config.generation_size
+                batch_end = min(config.episodes, next_update, next_generation)
+                learner_state = _cpu_state_dict(agent.network)
+                for batch_episode in range(episode, batch_end):
+                    episode_rng = random.Random(config.seed + batch_episode)
+                    profile_names = training_league.sample_lineup(
+                        config.num_players - 1,
+                        archive_available=bool(archive),
+                        rng=episode_rng,
+                        episode_index=batch_episode,
+                    )
+                    archive_states = []
+                    episode_profile_counts = {name: 0 for name in profile_counts}
+                    episode_archive_counts: dict[str, int] = {}
+                    for seat, profile_name in enumerate(profile_names):
+                        if profile_name == "archive":
+                            old_generation, old_agent = episode_rng.choice(archive)
+                            archive_states.append((old_generation, _cpu_state_dict(old_agent.network)))
+                            episode_profile_counts["archive"] += 1
+                            generation_label = str(old_generation)
+                            episode_archive_counts[generation_label] = (
+                                episode_archive_counts.get(generation_label, 0) + 1
+                            )
+                        else:
+                            episode_profile_counts[profile_name] += 1
+                    if progress_callback is not None:
+                        progress_callback({
+                            "event": "episode_start",
+                            "episode": float(batch_episode + 1),
+                            "generation": float(generation + 1),
+                            "opponents": tuple(profile_names),
+                        })
+                    episode_status_path = status_root / f"episode_{batch_episode + 1:06d}.json"
+                    _write_episode_status(
+                        episode_status_path,
+                        status="queued",
+                        episode=batch_episode + 1,
+                        generation=generation + 1,
+                        seed=config.seed + batch_episode,
+                        opponents=profile_names,
+                    )
+                    rollout_futures[batch_episode] = rollout_pool.submit(
+                        _run_rollout_worker,
+                        {
+                            "episode_index": batch_episode,
+                            "episode_seed": config.seed + batch_episode,
+                            "profile_names": tuple(profile_names),
+                            "archive_states": archive_states,
+                            "learner_state": learner_state,
+                            "status_path": str(episode_status_path),
+                        },
+                    )
+                    rollout_metadata[batch_episode] = (
+                        episode_profile_counts, episode_archive_counts
+                    )
+            try:
+                trajectory, outcome = rollout_futures.pop(episode).result()
+            except BaseException as exc:
+                rollout_pool.shutdown(wait=False, cancel_futures=True)
+                env.close()
+                raise RuntimeError(
+                    f"Falha ao coletar a partida {episode + 1} da geração "
+                    f"{episode // config.generation_size + 1}."
+                ) from exc
+            episode_profile_counts, episode_archive_counts = rollout_metadata.pop(episode)
+            for name, count in episode_profile_counts.items():
+                profile_counts[name] += count
+            for generation_label, count in episode_archive_counts.items():
+                archive_generation_counts[generation_label] = (
+                    archive_generation_counts.get(generation_label, 0) + count
+                )
         pending.extend(trajectory)
         row = {"episode": float(episode + 1), **{key: float(value) for key, value in outcome.items()}}
         generation_finished = (episode + 1) % config.generation_size == 0 or episode + 1 == config.episodes
+        update_seconds = 0.0
         if (episode + 1) % config.episodes_per_update == 0 or generation_finished:
+            update_started = perf_counter()
             row.update(agent.update(pending))
+            update_seconds = perf_counter() - update_started
             pending.clear()
+        row["ppo_update_seconds"] = update_seconds
         if config.evaluation_interval and (episode + 1) % config.evaluation_interval == 0:
             row.update({f"eval_{key}": value for key, value in evaluate_ppo(
                 agent, config, seed=config.seed + 100_000 + episode * config.evaluation_games
@@ -612,14 +1125,23 @@ def train_ppo(
         history.append(row)
         if progress_callback is not None:
             progress_callback({**row, "event": "episode_end"})
+        checkpoint_started = perf_counter()
+        save_training_checkpoint(episode + 1)
+        checkpoint_seconds = perf_counter() - checkpoint_started
+        row["checkpoint_seconds"] = checkpoint_seconds
+        history[-1] = row
+        _write_episode_status(
+            status_path,
+            status="training_committed",
+            episode=episode + 1,
+            generation=int(row.get("generation", generation)),
+            outcome=outcome,
+            ppo_update_seconds=update_seconds,
+            checkpoint_seconds=checkpoint_seconds,
+        )
     env.close()
+    if rollout_pool is not None:
+        rollout_pool.shutdown(wait=True, cancel_futures=True)
     if checkpoint_path is not None:
-        path = Path(checkpoint_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "format": "monopoly-ai-ppo-v2",
-            "model": agent.network.state_dict(),
-            "optimizer": agent.optimizer.state_dict(),
-            "config": asdict(config),
-        }, path)
+        save_training_checkpoint(config.episodes)
     return agent, history

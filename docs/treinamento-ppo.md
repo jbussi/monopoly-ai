@@ -53,10 +53,32 @@ contra perfis fora do conjunto de treino.
 
 Instale as dependências opcionais e abra
 [`notebooks/treinamento_liga_ppo.ipynb`](../notebooks/treinamento_liga_ppo.ipynb).
-O notebook está configurado para 3.000 partidas de quatro jogadores. Para um
-piloto, reduza `TRAINING_GAMES`; para o treino longo, acompanhe duração,
-truncagens e progresso por partida. O custo depende bastante dos turnos
-necessários e dos cálculos de analytics em cada observação.
+O notebook está configurado como piloto de 100 partidas de quatro jogadores.
+Aumente `GAMES_PER_GENERATION` e `NUM_GENERATIONS` para um treino longo e
+acompanhe duração, truncagens e progresso por partida. O custo depende bastante
+dos turnos necessários e dos cálculos de analytics em cada observação.
+
+## Forecasts e tempos por etapa
+
+Os forecasts analíticos de caixa e as features de decisão usam agora 1 e 2
+rodadas futuras. O modelo de movimento Markov é mantido num cache limitado por
+configuração e regras, e seus
+resultados exatos de dados/cartas por estado são reutilizados entre decisões e
+cenários clonados. Nas decisões de gestão, o caminho de caixa do estado-base é
+calculado uma vez e compartilhado entre as ações candidatas. As rendas e yields
+estacionários de portfólio continuam disponíveis, e as projeções de cenário
+usam os horizontes curtos de 1 e 2 rodadas.
+
+Os registros de cada episódio incluem tempos de política, avanço do ambiente,
+codificação da observação/candidatas e análise de trocas. Também incluem os
+tempos e quantidades de chamadas dos caminhos de caixa condicionais, de compra,
+gestão e prisão, além do PPO update e do salvamento do checkpoint. Os dados ficam
+na linha do episódio retornada pelo treino e no arquivo correspondente em
+`runs/policy_bank/episode_status/`. `candidate_encoding_seconds` inclui o tempo
+de `trade_analysis_seconds`, e `environment_step_seconds` inclui a observação;
+esses campos se sobrepõem e não devem ser somados como durações independentes.
+Como o eixo de horizonte da rede mudou, use um novo caminho de checkpoint e
+archive para este contrato.
 
 Também é possível configurar diretamente:
 
@@ -69,12 +91,40 @@ config = PPOTrainingConfig(
     generation_size=100,
     archive_opponent_rate=0.5,
     archive_dir="runs/policy_bank",
+    num_workers=4,
+    device="auto",
 )
 agent, history = train_ppo(
     config,
     checkpoint_path="runs/checkpoints/ppo_latest.pt",
 )
 ```
+
+`num_workers` define quantos processos coletam episódios em paralelo. Use `1`
+para execução sequencial; valores maiores distribuem partidas pela CPU. Os
+episódios de cada lote usam os mesmos pesos e só são atualizados juntos, para
+preservar a semântica do PPO. `device="auto"` usa CUDA na otimização da rede
+quando PyTorch detecta uma GPU compatível e, caso contrário, usa CPU. A
+simulação do jogo continua na CPU; os workers mantêm ambientes próprios e
+retornam trajetórias ao processo de treino. Em notebooks no Windows, a criação
+de processos usa o método `spawn`, portanto o kernel precisa conseguir importar
+o pacote do projeto.
+
+Quando `checkpoint_path` é informado, o treinador grava um checkpoint atômico
+após cada partida confirmada. Ele contém pesos, otimizador, geradores aleatórios,
+geração, histórico e trajetórias que ainda aguardam o próximo update PPO. Para
+retomar, passe o mesmo arquivo em `resume_from` e mantenha a configuração do jogo,
+PPO e liga; o número de workers e o dispositivo podem mudar. Partidas concluídas
+e confirmadas não são repetidas. Uma partida interrompida no meio é reiniciada
+desde sua seed determinística, e seu progresso anterior fica registrado.
+
+O diretório `archive_dir/episode_status/` contém um JSON por partida com seed,
+oponentes, status, progresso a cada 25 decisões do aprendiz e estado final de
+cada assento (caixa, patrimônio, posição, propriedades, falência, casas e
+hipotecas). Os status distinguem fila, execução, rollout calculado e checkpoint
+confirmado. Se houver apenas um snapshot `generation_XXXXX.pt` de um treino
+antigo, ele pode ser usado em `resume_from` como warm start dos pesos; esse
+formato antigo não contém o estado do otimizador nem o histórico de partidas.
 
 `TrainingLeague` permite mudar as heurísticas e a frequência de oponentes
 históricos. Cada heurística é uma fábrica sem argumentos, por exemplo:

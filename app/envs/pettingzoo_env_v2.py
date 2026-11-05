@@ -41,7 +41,7 @@ class raw_env(AECEnv):
         config: GameConfig | None = None,
         reward_fn: RewardFn = win_loss_reward,
         render_mode: str | None = None,
-        decision_horizons: tuple[int, ...] = (1, 3, 5),
+        decision_horizons: tuple[int, ...] = (1, 2),
         max_decision_alternatives: int = 128,
     ) -> None:
         super().__init__()

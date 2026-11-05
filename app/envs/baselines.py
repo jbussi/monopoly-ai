@@ -39,11 +39,20 @@ class RandomPolicy:
         self.rng.seed(seed)
 
     def __call__(self, loop: GameLoop) -> GameAction:
-        legal = loop.legal_actions()
         if loop.game.pending_trade is not None:
-            reject = next((action for action in legal if action.action_type == ActionType.REJECT_TRADE), None)
-            if reject is not None:
-                return reject
+            responses = loop.trade_response_actions()
+            reject = next(
+                (action for action in responses if action.action_type == ActionType.REJECT_TRADE),
+                None,
+            )
+            if reject is None or loop.validate(reject) is not None:
+                raise RuntimeError("Oferta pendente sem ação legal de rejeição.")
+            return reject
+        legal = loop.legal_actions()
+        if not legal:
+            raise RuntimeError(
+                f"RandomPolicy recebeu zero ações legais na fase {loop.turn_phase}."
+            )
         return self.rng.choice(legal)
 
 
@@ -51,11 +60,16 @@ class AggressivePolicy:
     """Prioriza expandir: compra, disputa leilões e desenvolve cedo."""
 
     def __call__(self, loop: GameLoop) -> GameAction:
-        legal = loop.legal_actions()
         if loop.game.pending_trade is not None:
-            accept = next((action for action in legal if action.action_type == ActionType.ACCEPT_TRADE), None)
-            if accept is not None:
-                return accept
+            responses = loop.trade_response_actions()
+            accept = next(
+                (action for action in responses if action.action_type == ActionType.ACCEPT_TRADE),
+                None,
+            )
+            if accept is None or loop.validate(accept) is not None:
+                raise RuntimeError("Oferta pendente sem ação legal de aceitação.")
+            return accept
+        legal = loop.legal_actions()
         by_kind: dict[str, list[GameAction]] = {}
         for action in legal:
             by_kind.setdefault(action.action_type, []).append(action)
@@ -102,11 +116,16 @@ class ConservativePolicy:
         self.reserve = reserve
 
     def __call__(self, loop: GameLoop) -> GameAction:
-        legal = loop.legal_actions()
         if loop.game.pending_trade is not None:
-            reject = next((action for action in legal if action.action_type == ActionType.REJECT_TRADE), None)
-            if reject is not None:
-                return reject
+            responses = loop.trade_response_actions()
+            reject = next(
+                (action for action in responses if action.action_type == ActionType.REJECT_TRADE),
+                None,
+            )
+            if reject is None or loop.validate(reject) is not None:
+                raise RuntimeError("Oferta pendente sem ação legal de rejeição.")
+            return reject
+        legal = loop.legal_actions()
         by_kind: dict[str, list[GameAction]] = {}
         for action in legal:
             by_kind.setdefault(action.action_type, []).append(action)

@@ -126,7 +126,7 @@ def evaluate_candidate(
     candidate_action: GameAction,
     *,
     baseline_action: GameAction | None = None,
-    horizons: Iterable[int] = (1, 3, 5),
+    horizons: Iterable[int] = (1, 2),
     simulations: int = 64,
     seed: int | None = None,
     greedy_reserve: int = 150,
@@ -170,6 +170,7 @@ def evaluate_candidate(
         ]
         analysis = analyze_debt_resolution(
             loop,
+            config,
             candidate_actions=debt_actions,
             horizons=horizon_values,
             simulations=simulations,
@@ -365,6 +366,7 @@ def _evaluate_scenario(
     forecast = forecast_cash_flow(
         loop,
         player_id,
+        config=config,
         horizons=horizons,
         simulations=simulations,
         seed=seed,
