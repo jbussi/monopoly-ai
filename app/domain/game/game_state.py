@@ -147,6 +147,8 @@ class GameState:
         self.game_over: bool = False
         self.winner_id: UUID | None = None
         self.truncated: bool = False
+        # Ordem em que os participantes faliram; primeiro eliminado primeiro.
+        self.elimination_order: list[UUID] = []
 
         self.record_events = record_events
         self.history_logs: list[dict[str, Any]] = []

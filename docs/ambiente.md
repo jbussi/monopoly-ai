@@ -178,8 +178,12 @@ baralhos do clone (*determinization*).
 
 ## Recompensa
 
-Padrão: `win_loss_reward`, que dá +1 ao vencedor, -1 a quem vai à falência e 0 no resto
-(inclusive na truncagem). Para trocar, passe `reward_fn=lambda loop, player_id: ...`.
+Padrão: `win_loss_reward`, que pontua a colocação final com uma distribuição geométrica
+simétrica de razão 0,4 entre +1 e -1. Em partidas ímpares, a colocação central vale 0.
+Na truncagem, os falidos mantêm a recompensa da colocação definida pela ordem de eliminação;
+os sobreviventes empatam. Com `k` sobreviventes, recebem +1 se `k = 1`; caso contrário,
+recebem `1,05 × R(k)` quando `R(k) > 0`, ou `0,4 ** k` quando `R(k) <= 0`, sendo `R(k)` a
+recompensa normal da posição `k`. Para trocar, passe `reward_fn=lambda loop, player_id: ...`.
 A função é chamada após cada ação, para cada jogador ativo. `GameState` expõe `net_worth`,
 `liquidation_value` e `rent_for` para montar o shaping. As análises de `app/domain/analytics`
 (distribuição estacionária, ROI por cor) também servem de base para shaping ou para features extras.

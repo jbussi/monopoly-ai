@@ -120,6 +120,7 @@ class raw_env(AECEnv):
         self.agents = list(self.possible_agents)
         self.rewards = {agent: 0.0 for agent in self.agents}
         self._cumulative_rewards = {agent: 0.0 for agent in self.agents}
+        self._terminal_rewards_paid: set[str] = set()
         self.terminations = {agent: False for agent in self.agents}
         self.truncations = {agent: False for agent in self.agents}
         self.infos = {agent: {} for agent in self.agents}
@@ -233,9 +234,19 @@ class raw_env(AECEnv):
         game = self.loop.game
         for name in self.agents:
             player_id = self._player_id(name)
-            self.rewards[name] = float(self.reward_fn(self.loop, player_id))
             self.terminations[name] = game.player_states[player_id].is_bankrupt or game.winner_id is not None
             self.truncations[name] = game.truncated
+            reward = float(self.reward_fn(self.loop, player_id))
+            if self.reward_fn is win_loss_reward:
+                # Placement rewards are terminal outcomes, not per-step shaping.
+                terminal = self.terminations[name] or self.truncations[name]
+                self.rewards[name] = (
+                    reward if terminal and name not in self._terminal_rewards_paid else 0.0
+                )
+                if terminal:
+                    self._terminal_rewards_paid.add(name)
+            else:
+                self.rewards[name] = reward
         if not game.game_over:
             self.agent_selection = self._agent(self.loop.current_decision_player_id)
         self._accumulate_rewards()

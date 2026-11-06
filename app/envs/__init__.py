@@ -10,7 +10,7 @@ from .cash_flow_forecast import (
     forecast_cash_flow,
 )
 from .encoding import ObservationEncoder
-from .rewards import RewardFn, win_loss_reward
+from .rewards import RewardFn, placement_rewards, win_loss_reward
 from .text import describe_action, render_text
 
 ENV_VERSION = 1
@@ -35,6 +35,7 @@ __all__ = [
     "Policy",
     "RandomPolicy",
     "RewardFn",
+    "placement_rewards",
     "StructuredActionSpace",
     "describe_action",
     "forecast_cash_flow",

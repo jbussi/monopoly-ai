@@ -1528,6 +1528,8 @@ class GameLoop:
     def _bankrupt(self, player_id: UUID, creditor_id: UUID | None) -> None:
         game = self.game
         state = game.player_states[player_id]
+        if not state.is_bankrupt and player_id not in game.elimination_order:
+            game.elimination_order.append(player_id)
         game.log_event("BANKRUPTCY", {"player_id": player_id, "creditor_id": creditor_id})
         game.debts = [d for d in game.debts if d.debtor_id != player_id]
         if (

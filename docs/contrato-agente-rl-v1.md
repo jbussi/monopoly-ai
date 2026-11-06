@@ -134,24 +134,25 @@ comparáveis; não elimina a incerteza Monte Carlo.
 
 ## 6. Recompensa e encerramento
 
-A recompensa padrão é `win_loss_reward`: +1 para o vencedor, −1 para o jogador
-declarado falido e 0 nos demais casos. Ela é esparsa; não recompensa caixa,
-patrimônio ou aquisição de imóveis durante a partida. Shaping é uma escolha
-explícita do treinador por meio de `reward_fn`.
+A recompensa padrão é `win_loss_reward`, definida pela colocação final. O
+primeiro recebe +1 e o último −1; em partidas ímpares, a posição central recebe
+0. As demais posições decaem geometricamente, com razão 0,4, em direção ao
+centro. As recompensas são simétricas.
 
 Fim natural e limite de turnos são sinais distintos:
 
 - vitória/falência encerra o episódio naturalmente (`terminated`);
-- atingir `max_turns` encerra por limite (`truncated`), sem vencedor, e a
-  recompensa padrão é 0 para todos;
+- atingir `max_turns` encerra por limite (`truncated`), sem vencedor. Jogadores
+  falidos mantêm a recompensa de sua colocação pela ordem de eliminação; os
+  sobreviventes empatam. Com `k` sobreviventes, recebem +1 se `k = 1`; caso
+  contrário recebem `1,05 × R(k)` quando `R(k) > 0`, ou `0,4 ** k` quando
+  `R(k) <= 0`. Aqui, `R(k)` é a recompensa normal da posição `k` na partida;
 - truncagem não deve ser contabilizada como vitória nem como falência. Relate-a
   separadamente em avaliações e decida explicitamente como o algoritmo de
   treino trata o bootstrap no limite do episódio.
 
-A recompensa padrão de truncagem é neutra por compatibilidade com o
-comportamento atual. Uma futura recompensa baseada em patrimônio no limite do jogo será uma
-mudança deliberada de objetivo e requer versão/experimento próprios; não é
-aplicada implicitamente neste contrato.
+O número de eliminações fica registrado no estado da partida para tornar as
+colocações reproduzíveis, inclusive quando o ambiente não grava logs de eventos.
 
 ## 7. Fronteira dos ambientes e treinamento
 
